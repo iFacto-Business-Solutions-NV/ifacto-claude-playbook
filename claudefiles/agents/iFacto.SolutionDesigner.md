@@ -154,7 +154,7 @@ Cut the work into vertical slices wherever you can. Every instruction document h
 **Cutting rules:**
 1. **Vertical, never per layer.** Every slice delivers behaviour that is observable through a public procedure. A slice "all tables" or "all pages" has no behaviour to test, so `iFacto.SDD` cannot write a valid RED for it (a test that compiles, runs and fails on an assert).
 2. **One coherent behaviour per slice.** Its acceptance criteria fit in one RED. A slice that holds several behaviours is several slices.
-3. **Walking skeleton first.** `S1` is the smallest end-to-end happy path. Then variants, validation and error handling, edge cases. UI comes last, tested with TestPage.
+3. **Walking skeleton first.** `S1` is the smallest end-to-end happy path. Then variants, validation and error handling, edge cases. UI comes last, and never with a TestPage (company rule `testing/ifacto-no-ui-in-tests`): what a page action or field does is an acceptance criterion on the codeunit or table procedure the page calls. What is only visible on the page — a field shown or editable, an action present, a caption — goes on the **Manual checks** line, not into a criterion.
 4. **Dependencies point backwards only.** Slice N uses only objects from slice N and earlier slices — never from a later one.
 5. **A test seam lands in the slice that first needs it.** An interface + enum for dependency injection, or an `OnBefore…`/`OnAfter…` event a test double attaches to, is introduced in the first slice whose tests need it — not up front.
 6. **Cut by behaviour, not by count.** There is no measured slice size yet: do not invent a maximum number of tests or objects per slice.
@@ -173,10 +173,11 @@ Cut the work into vertical slices wherever you can. Every instruction document h
 **Objects:** <Object type> <Ninja> "<Name>" (new | changed), ...
 **Test seams:** <interface or event> → <Dummy | Stub | Spy | Throwing>, ... | none
 **Test codeunit:** Codeunit <Ninja> "<Name>" (new | extends the one from Sx)
+**Manual checks:** <what is only visible on the page: a field shown, an action present> | none
 **Not in this slice:** <what a reader might expect here but comes in Sx> | —
 ```
 
-Each acceptance criterion becomes exactly one `[Test]` method. Write criteria that are concrete and checkable — a named error label, a field value, a status — never "works correctly".
+Each acceptance criterion becomes exactly one `[Test]` method, and none of them needs a page to be tested. A manual check gets no `[Test]`: the developer verifies it in the functional test of `/iFacto.Pullrequest`. Write criteria that are concrete and checkable — a named error label, a field value, a status — never "works correctly".
 
 Present draft for review → re-validate every section against the loaded company rules and product constraints → incorporate feedback.
 

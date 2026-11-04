@@ -79,14 +79,30 @@ Then, for platform-level guidance as needed:
 - Use ONLY the IDs assigned in Step 2.5 — no placeholder IDs, no `50000`-style fillers to be "fixed later"
 - File naming: `<ObjectType> <ID> <Name>.al`
 - One object per file (iFacto standard)
+- **Test code: write no UI test** (company rule `testing/ifacto-no-ui-in-tests`) — whenever you write or change a `Subtype = Test` codeunit (a slice's **Test codeunit**, a test the developer asks for, a review fix): never a `TestPage` or `TestRequestPage`, and never a test that has to catch a page with a `[PageHandler]`, `[ModalPageHandler]` or `[RequestPageHandler]`. Call the codeunit or table procedure the page delegates to. Every UI test loads a page, and those page loads are what make the test stage of the build slow. A criterion that is only observable on the page — a field shown or editable, an action present, a caption, or a slice's **Manual checks** line — gets no `[Test]`: list it under **Manual checks** in the Step 5 hand-off. Dialog handlers (`[ConfirmHandler]`, `[MessageHandler]`, `[StrMenuHandler]`, notification handlers) open no page and stay allowed
 
 ### Step 4: Build and Validate
 Follow the `iFacto.al-build-validation` skill:
 - Run `ms-dynamics-smb.al/al_build` → fix errors → rebuild → confirm clean build
 - **Code is NOT complete until build succeeds**
 
+### Step 4.5: UI-Test Check (when the workspace has a Test project)
+
+UI tests make the test stage of the build slow. Skip this step only when the workspace has no `Subtype = Test` codeunit.
+
+1. **Scan** every `Subtype = Test` codeunit for UI tests: a `[Test]` method that uses a `TestPage` or `TestRequestPage` variable, or whose `HandlerFunctions` names a procedure marked `[PageHandler]`, `[ModalPageHandler]` or `[RequestPageHandler]`. A UI test with `// UI test kept: <reason>` directly above its `[Test]` attribute was kept on purpose: skip it.
+2. **Feature area** — the UI tests in test codeunits this run wrote or changed, and in test codeunits that reference an object this run created or changed. None there → ask nothing: when UI tests exist elsewhere, name their number and codeunits in one line and point to a cleanup-only `/iFacto.SDD` cycle (sandbox) or a separate ALCoder run. Then Step 5.
+3. **Judge each UI test in the feature area** — read what it asserts and what the page calls:
+   - **Convert** — the asserted behaviour lives in a codeunit or table procedure that the page calls → rewrite it as a test that calls that procedure, with data built in memory and the same assertions
+   - **Delete** — little or no value: it only checks that a page opens, that a field is visible or editable, or that a caption or an action exists — or a test without UI already asserts the same outcome
+   - **Keep** — the behaviour exists only on the page and a defect there would hurt; state that reason. Also when the logic sits in page code (against the rule that pages hold no business logic): converting it means moving production code first, which is a change of its own — propose it, do not do it now
+4. **Ask** — show a table with codeunit, test method, verdict and a one-line reason, then ask with `AskUserQuestion`, one question: **Apply the proposal (Recommended)** — delete, convert and mark as proposed, then rebuild; a converted test is built but not run by this agent / **Leave them** — change nothing. With a `"environmentType": "Sandbox"` configuration in `.vscode/launch.json`, add that a cleanup-only `/iFacto.SDD` cycle also runs every converted test and proves it with a mutation. Never convert, delete or mark a test without that answer. **Running as a subagent** (no channel to the developer): change no UI test — put the table in your final report for the caller.
+5. **Carry out the choice** — delete a **Delete** test and every handler procedure nothing uses any more (a test codeunit left without tests is deleted and its ID released via `iFacto.object-id-assignment`); write each **Convert** test (a new object gets its ID via `iFacto.object-id-assignment`); add `// UI test kept: <reason>` above each **Keep** test. Then Step 4 again: the build must be clean.
+
 ### Step 5: Hand Off to Code Review
-After successful build, hand off to `iFacto.CodeReviewer` for validation.
+After successful build, hand off to `iFacto.CodeReviewer` for validation. When this run touched test code or found UI tests, the hand-off carries two lines:
+- `UI tests: <c> converted (built, not run — on a SaaS sandbox /iFacto.Pullrequest Step 4 runs them; on OnPrem nothing does, so the developer runs them before the PR), <d> deleted, <k> kept, <l> left`
+- `Manual checks: <criteria only observable on the page, for the functional test of /iFacto.Pullrequest> | none`
 
 ## Common Scenarios
 | Scenario | Order |
@@ -94,7 +110,8 @@ After successful build, hand off to `iFacto.CodeReviewer` for validation.
 | New Table | company-guidelines → object-id-assignment (object + every field) → implement → build → CodeReviewer |
 | Table Extension | company-guidelines (PTE suffix) → object-id-assignment (extension object + every new field) → implement → build → CodeReviewer |
 | Business Logic (Meth Codeunit) | company-guidelines (ONE public procedure) → object-id-assignment → implement → build → CodeReviewer |
-| Page/Report | company-guidelines (no page-local logic) → object-id-assignment → implement → build → CodeReviewer |
+| Page/Report | company-guidelines (no page-local logic) → object-id-assignment → implement → build → CodeReviewer — no TestPage test for it: what the page only shows is a manual check |
+| Test codeunit | company-guidelines (no UI tests) → object-id-assignment → implement → build → UI-test check (Step 4.5) → CodeReviewer |
 | New enum value / enumextension | company-guidelines → object-id-assignment (value ID from the parent enum) → implement → build → CodeReviewer |
 
 ## Knowledge Sources

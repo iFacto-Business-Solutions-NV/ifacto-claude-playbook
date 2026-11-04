@@ -21,6 +21,7 @@ When invoked, immediately assess the request and route to the correct agent if n
 | Code review of existing code (no SDD cycle) | `iFacto.CodeReviewer` — hand off immediately |
 | Pipeline / build / deployment errors | `iFacto.DevOps.PipelineAnalyzer` — hand off immediately |
 | AL implementation WITH tests / SDD / TDD / Red-Green-Mutate | **Stay here — this is the right agent** |
+| Converting or deleting UI tests (`TestPage`, page handlers) | **Stay here** — a cleanup-only cycle (Step 9.5) |
 
 If the user's intent is ambiguous, default to staying in this agent and starting the SDD workflow (Step 0 below).
 
@@ -48,6 +49,7 @@ Every phase of the cycle publishes both projects to the sandbox and runs tests t
 - **Design First**: Check for a design document in `App/Docs/Instructions/` before complex implementations — recommend `iFacto.SolutionDesigner` if none exists
 - **Minimum Implementation**: In the GREEN phase, write only enough code to make tests pass — no gold-plating
 - **Mandatory Mutate**: The MUTATE phase is NOT optional — every cycle must prove the tests catch regressions by deliberately breaking the implementation and confirming all scoped tests fail
+- **No UI Tests**: tests call the procedure behind the page, never the page (Step 3); every cycle checks the Test project for UI tests and proposes to convert or delete them (Step 9.5)
 - **Company Standards Have HIGHEST Priority**: the iFacto company rules loaded via the `iFacto.company-guidelines` skill are MANDATORY for both production code and test code
 - **Never Invent Object IDs**: before creating any AL object, field, or enum value, reserve its ID via the `iFacto.object-id-assignment` skill (AL Object ID Ninja) — production objects, RED-phase stubs, test codeunits, and test doubles alike; never guess, hardcode, or read `idRanges` yourself
 - **Always Build**: Each phase ends with a successful `ms-dynamics-smb.al/al_build`
@@ -76,7 +78,7 @@ Before writing any code, check if a design document already exists.
 1. Search `App/Docs/Instructions/` for files matching the JIRA ID or feature name (e.g., `BEG-123.*.design.md`)
 2. **If found** ✅:
    - Read it thoroughly — extract test scenarios from Section 6 (Business Logic) and Section 13 (Implementation Slices; an older document has a phased Implementation Plan there)
-   - Use the acceptance criteria and test scenarios as the basis for your test codeunit(s). In a sliced document every `GIVEN … WHEN … THEN …` acceptance criterion is exactly one `[Test]` method, and each slice's **Objects**, **Test seams** and **Test codeunit** lines name what the stubs and test doubles must be
+   - Use the acceptance criteria and test scenarios as the basis for your test codeunit(s). In a sliced document every `GIVEN … WHEN … THEN …` acceptance criterion is exactly one `[Test]` method, and each slice's **Objects**, **Test seams** and **Test codeunit** lines name what the stubs and test doubles must be. A slice's **Manual checks** line holds what is only observable on the page: no `[Test]` for those — they go into the Step 10 summary
    - Say: `"Found design document [filename] — deriving test cases from it."`
 3. **If not found** 💡:
    - For **complex features**: suggest switching to `iFacto.SolutionDesigner` to define acceptance criteria first
@@ -210,7 +212,10 @@ Write the test codeunit(s) that verify the expected behaviour. Tests must fail a
 - File naming: `Codeunit <ID> <FeatureName> Tests.al` in the Test project
 - Use `[Test]` attribute on test methods
 - Use `LibraryAssert` for assertions — not raw `Error()`
-- Use handler methods (`[ModalPageHandler]`, `[ConfirmHandler]`, etc.) to suppress UI
+- **Write no UI test** (company rule `testing/ifacto-no-ui-in-tests`, loaded in Step 2): never a `TestPage` or `TestRequestPage`, and never a test that has to catch a page with a `[PageHandler]`, `[ModalPageHandler]` or `[RequestPageHandler]`. Call the codeunit or table procedure the page delegates to. Every UI test loads a page, and those page loads are what make the test stage of the build slow
+- A criterion that is only observable on the page — a field shown or editable, an action present, a caption — gets **no** `[Test]`: list it under **Manual checks** in the Step 10 summary, for the functional test of `/iFacto.Pullrequest`
+- Code under test that opens a page itself (`Page.RunModal` in the middle of the logic) is the defect, not the test: the procedure under test takes the page's result as a parameter, and the page call goes one level up, into the page action
+- A dialog the code under test raises is caught by its handler (`[ConfirmHandler]`, `[MessageHandler]`, `[StrMenuHandler]`, notification handlers). That opens no page and is not a UI test
 - Tests must be self-contained — initialise all required data within each test or in `[SetUp]`
 - Follow iFacto naming conventions for all identifiers (English only)
 
@@ -392,6 +397,44 @@ After reverting all mutations:
 
 ---
 
+## UI-TEST CHECK — Every Cycle
+
+### Step 9.5: UI-Test Check (mandatory — ALWAYS execute, do NOT skip)
+
+UI tests make the test stage of the build slow (company rule `testing/ifacto-no-ui-in-tests`). This cycle wrote none (Step 3). This step finds the ones already in the Test project and proposes to convert or delete them.
+
+**Cleanup-only request** — the developer only asks to convert or delete UI tests, and no production code changes: run Steps -1 to 2.5, then this step, then Step 10. There is no RED, GREEN or MUTATE of a feature, because no production code is written; the converted tests still go through the proof in sub-step 6.
+
+1. **Scan** every `Subtype = Test` codeunit in the Test project — the whole project, not only this cycle's codeunits. A `[Test]` method is a **UI test** when it uses a `TestPage` or `TestRequestPage` variable, or when its `HandlerFunctions` names a procedure marked `[PageHandler]`, `[ModalPageHandler]` or `[RequestPageHandler]`. Confirm, message, StrMenu and notification handlers alone do not make a UI test. A UI test with the comment `// UI test kept: <reason>` directly above its `[Test]` attribute was kept on purpose: count it, propose nothing for it.
+2. **No UI test to propose** → say so in one line, then Step 10.
+3. **Judge each UI test** — read what it asserts and what the page calls, then give it one verdict:
+
+   | Verdict | When |
+   |---|---|
+   | **Convert** | The asserted behaviour lives in a codeunit or table procedure that the page calls → rewrite it as a test that calls that procedure, with data built in memory and the same assertions |
+   | **Delete** | Little or no value: it only checks that a page opens, that a field is visible or editable, or that a caption or an action exists — or a test without UI already asserts the same outcome |
+   | **Keep** | The behaviour exists only on the page and a defect there would hurt; state that reason. Also when the logic sits in page code (against the rule that pages hold no business logic): converting it means moving production code first, which is a cycle of its own — propose that cycle, do not do it now |
+
+4. **Show the proposal and ask** — a table with codeunit, test method, verdict and a one-line reason, split into the **feature area** (UI tests in the test codeunits this cycle created or changed, and in test codeunits that reference an object this cycle created or changed) and the rest of the Test project. Then ask with `AskUserQuestion`, one question:
+   - **Feature area (Recommended)** — apply the proposal to the N UI tests in the feature area; the PR stays about this feature
+   - **Whole test project** — apply it to all M; the PR grows with test changes outside the feature
+   - **Leave them** — change nothing; the next cycle proposes them again
+
+   When N equals M, offer only "apply the proposal (Recommended)" and "leave them". When N is 0, ask nothing: name the M UI tests elsewhere in one line and point to a cleanup-only `/iFacto.SDD` cycle for them, then Step 10. Never convert, delete or mark a test without that answer.
+5. **Carry out the choice:**
+   - **Delete** — remove the test, and every handler procedure nothing uses any more. A test codeunit left without tests is deleted, and its ID released with `iFacto.object-id-assignment`
+   - **Convert** — write the test without UI. A new test codeunit or test double gets its ID from `iFacto.object-id-assignment`
+   - **Keep** — add `// UI test kept: <reason>` directly above its `[Test]` attribute
+6. **Prove it:**
+   - Build both projects (`iFacto.al-build-validation`) — a removed handler or helper must not break the build. Nothing converted → Step 10
+   - Publish both projects (target configuration and QA check, as in Step 4), then run every converted test codeunit with `iFacto.bc-saas-test-runner` → all converted tests PASS: they guard behaviour that already exists
+   - Mutate once, as in Step 9: break the procedure each converted test asserts on, all at once, publish, run → every converted test FAILS. A converted test that still passes does not verify what the UI test verified: fix it and run again
+   - Revert all mutations, publish, run → all converted tests PASS
+
+> ✅ UI-test check complete when: the Test project was scanned, the developer chose what happens to the UI tests found, and every converted test passed, failed under mutation and passed again.
+
+---
+
 ### Step 10: Report Duration and Hand Off to Code Review
 
 Before handing off, capture the end time and display the total SDD duration:
@@ -408,11 +451,13 @@ SDD cycle complete
   RED phase:    ✅
   GREEN phase:  ✅
   MUTATE phase: ✅
+  UI tests:     <c> converted, <d> deleted, <k> kept, <l> left (Step 9.5)
+  Manual checks: <criteria only observable on the page, for the functional test of /iFacto.Pullrequest> | none
   Total duration: Xh Ym Zs
 ---
 ```
 
-Convert total seconds to hours/minutes/seconds for readability (omit hours if zero).
+Convert total seconds to hours/minutes/seconds for readability (omit hours if zero). A cleanup-only cycle shows `—` for RED, GREEN and MUTATE.
 
 After displaying the summary, hand off to `iFacto.CodeReviewer`.
 
@@ -438,6 +483,7 @@ These rules are enforced unconditionally:
 12. **All object IDs come from AL Object ID Ninja** — every new object, field, and enum value in BOTH projects (production code, RED stubs, test codeunits, test doubles) gets its ID reserved via the `iFacto.object-id-assignment` skill; hand-picked, guessed, incremented, or `idRanges`-derived IDs are forbidden, and if the Ninja tool is unavailable, stop and report instead of falling back
 13. **No foreign DEV extension is removed without asking** — Step 1.6 lists the DEV extensions in the sandbox that do not belong to this workspace (`iFacto.sandbox-switch`); the developer decides every time whether they are uninstalled, and whether their data goes with them. Every sandbox is checked before the first publish, in every tenant. Without a token, the agent starts a device-code sign-in at once (`no-token` → Step 1a of the skill). The developer checks by hand (Step 1b) only when that sign-in fails. A check that fails is a hard stop, never a reason to publish blind
 14. **NEVER publish to a QA environment** — before the first publish (Step 1.5) and again before every publish, check the target configuration: the first `"environmentType": "Sandbox"` configuration in `.vscode/launch.json`. When its `"environmentName"` or `"name"` contains `QA` in any casing, that is a 🛑 hard stop for the whole cycle, also when it is a `"Sandbox"` and also when the developer insists. Every publish names the target configuration explicitly (`al_publish` with its `environmentName` and `tenant`), so QA configurations below it, such as the customer's debug and attach configurations, may stay. Never ask, never pick another configuration, never edit or reorder `launch.json` yourself — report and end the session; the developer puts the development sandbox at the top and re-runs
+15. **No UI tests** — SDD writes no `TestPage` or `TestRequestPage` test and no test that has to catch a page with a `[PageHandler]`, `[ModalPageHandler]` or `[RequestPageHandler]`; it calls the procedure behind the page (company rule `testing/ifacto-no-ui-in-tests`). Every cycle runs Step 9.5: it scans the whole Test project for UI tests and proposes per test to convert, delete or keep it. Nothing is converted, deleted or marked without the developer's answer, and a converted test counts only after it passed, failed under mutation and passed again
 
 ## Security
 

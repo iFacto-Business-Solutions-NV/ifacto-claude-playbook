@@ -75,8 +75,8 @@ The developer must personally confirm that the change was **functionally tested 
 
 ### 6.0 Only for a repository with an AL app
 The attestation is about running the change in Business Central. It applies whenever the repository holds an AL app: an `app.json` anywhere in it — tracked (`git ls-files "*app.json"`, `App/` and `Test/` in the usual layout), not yet added, or in a submodule.
-- **An AL app exists** → the attestation is mandatory: 6.1 to 6.5, with or without a `.vscode/launch.json`. launch.json only proposes the environment URL (6.3); without a matching configuration the developer gives it.
-- **No AL app** (no `app.json` anywhere in the repository) → there is nothing to run in Business Central — BCCompanyGuidelines, for instance, holds the skills themselves, not customer customisations. Skip 6.1 to 6.5 and ask nothing. `## Testing` starts with this line instead of the attestation, and Step 9 posts no attestation comment:
+- **An AL app exists** → the attestation is mandatory: 6.1 to 6.6, with or without a `.vscode/launch.json`. launch.json only proposes the environment URL (6.3); without a matching configuration the developer gives it.
+- **No AL app** (no `app.json` anywhere in the repository) → there is nothing to run in Business Central — BCCompanyGuidelines, for instance, holds the skills themselves, not customer customisations. Skip 6.1 to 6.6 and ask nothing. `## Testing` starts with this line instead of the attestation, and Step 9 posts no attestation comment:
 
 > ℹ️ **Functional test attestation: not applicable** — this repository holds no AL app (no `app.json`).
 
@@ -87,11 +87,20 @@ The attestation is about running the change in Business Central. It applies when
 2. No Jira (or the call fails): `git config user.name`
 3. Show the name in the question below so the developer can correct it
 
-### 6.2 Ask — after showing the Jira acceptance criteria (Step 1) and the changed objects (Step 3)
+### 6.1a Collect the manual checks
+What is only observable on a page — a field shown or editable, an action present, a caption — gets no automated test (company rule `testing/ifacto-no-ui-in-tests`). This gate is where it gets checked. Collect, without asking:
+- every **Manual checks** line of the slices in the design document of this change (`App/Docs/Instructions/`, section 13)
+- the `Manual checks:` line of an `iFacto.SDD` or `iFacto.ALCoder` summary in this session
+
+Nothing found → `none`.
+
+### 6.2 Ask — after showing the Jira acceptance criteria (Step 1), the changed objects (Step 3) and the manual checks (6.1a)
 Ask these three questions and wait for the answers:
 1. *"Have you functionally tested this change in your own environment, and do you vouch that it was actually tested? (yes/no) — recorded in the name of **{name}**."*
 2. *"In which environment, and what is its URL?"* (e.g. sandbox name, Docker container, OnPrem test DB). Propose the URL from `.vscode/launch.json` when a configuration matches the environment, and let the developer confirm or correct it — see 6.3.
 3. *"What did you test?"* (one line, the scenarios you ran)
+
+With manual checks collected, show them with question 3: the answer says which of them were run.
 
 ### 6.3 Environment URL — derive or ask, never invent
 The URL lets the reviewer and the Jira reporter open the environment the change was tested in.
@@ -105,6 +114,7 @@ The URL lets the reviewer and the Jira reporter open the environment the change 
 - **NEVER answer on the developer's behalf** and never pre-fill "yes". A passing test run or build is not an attestation either.
 - **"No", "partially", "not yet", or an evasive answer → STOP.** Generate no PR description and create no PR. Tell the developer to test first and re-run `/iFacto.Pullrequest`.
 - Questions 2 and 3 need a concrete answer — "yes" or "everything" is not one. Ask again once; still vague → STOP.
+- A manual check (6.1a) the developer did not run is not a STOP, but the PR lists it as `not run`. Never drop one, and never mark one as run yourself.
 - **Running as a subagent** (no channel to the developer): end the run and report to the caller that the attestation is required. Never assume it.
 
 ### 6.5 Attestation text (fixed wording — reuse verbatim in Step 7 and Step 9)
@@ -119,6 +129,9 @@ Use the developer's name, today's date (`YYYY-MM-DD`) and their answers. Do not 
 
 The attestation is always in **English**, like the rest of the PR. If the developer answers questions 2 or 3 in another language, translate the answer to English without adding, dropping or softening anything, and show the translated text to the developer before using it.
 
+### 6.6 Manual checks in the PR
+`## Testing` carries one line after the attestation: `🖐️ Manual checks: {check} — run | not run, ...`, or `🖐️ Manual checks: none`.
+
 ## Step 7: Generate PR Description
 **Format restrictions:**
 - ✅ Headings, bullet lists, emoticons, bold text
@@ -131,7 +144,7 @@ The attestation is always in **English**, like the rest of the PR. If the develo
 # [Emoticon] [JIRA-ISSUE]: [Title]
 ## Summary
 ## Changes
-## Testing  ← starts with the Step 6 attestation text (or the 6.0 not-applicable line)
+## Testing  ← starts with the Step 6 attestation text (or the 6.0 not-applicable line), then the 6.6 manual-checks line
 ## Deployment
 ## Assessment (star ratings as list)
 ---

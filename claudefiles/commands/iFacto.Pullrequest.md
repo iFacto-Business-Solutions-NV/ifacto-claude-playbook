@@ -33,10 +33,10 @@ Read `.vscode/launch.json` in the AL project root and apply the `iFacto.bc-saas-
 - **No AL app** (6.0) → skip. `## Testing` carries `🧪 Automated tests: not applicable — no AL app`.
 - **A configuration with `"environmentType": "Sandbox"`** → the gate applies: 4.1 to 4.3.
 - **OnPrem only** (`"server"` / `"serverInstance"`, no Sandbox configuration) → skip, ask nothing. `## Testing` carries `🧪 Automated tests: not run by the PR flow — OnPrem environment`.
-- **QA configuration, Production only, or no launch.json** in a repository with an AL app → **STOP.** Report the skill's hard-stop message. Never treat a missing launch.json as OnPrem, and never pick another environment.
+- **A target configuration (the first Sandbox one) that targets QA, Production only, or no launch.json** in a repository with an AL app → **STOP.** Report the skill's hard-stop message. Never treat a missing launch.json as OnPrem, and never pick another environment.
 
 ### 4.1 Publish, then run them all
-1. Publish the app and the test app as they are now to the sandbox (`iFacto.al-build-validation` skill). A publish that fails → **STOP** with the error. Objects owned by a foreign DEV extension → the `iFacto.sandbox-switch` skill, then publish again.
+1. Publish the app and the test app as they are now to the sandbox (`iFacto.al-build-validation` skill): `al_publish` with the target configuration passed explicitly, `environmentType: "Sandbox"` plus its `environmentName` and `tenant`. Never let a tool pick a configuration from `launch.json` on its own. A publish that fails → **STOP** with the error. Objects owned by a foreign DEV extension → the `iFacto.sandbox-switch` skill, then publish again.
 2. Collect **every** test codeunit in the workspace: every `.al` file with `Subtype = Test` (any casing), with its ID and name — not only the ones this change touched.
 3. Run each one with the `iFacto.bc-saas-test-runner` skill, all methods (no `--testmethods`). Do not ask which codeunits to run.
 4. No test codeunit in the workspace → nothing to run; continue (Step 3 already flags the missing tests).

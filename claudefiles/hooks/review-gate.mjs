@@ -207,10 +207,12 @@ export function resolveLeaves({ env = process.env, home = homedir() } = {}) {
 /* Evaluation                                                            */
 /* ==================================================================== */
 
-/** The rulebook pass opens `references/rulebook.md` once; a review stopped at the build gate never does. */
-const RULEBOOK_READ_RE = /iFacto[.-]code-review[\\/]+references[\\/]+rulebook\.md/i;
-/** What the rulebook skill's build gate writes when it stops the review before the rulebook. */
-const BUILD_STOP_RE = /build not clean|## Build\b|unknown build is not a clean build|build cannot run|al_build/i;
+/** The build actually ran: the AL MCP build/diagnostics tools (local mode) or `az` for the PR's validation build (pr mode). */
+const BUILD_TOOL_RE = /al_build|al_getdiagnostics|\balc\b|\baz\s+(repos|devops|pipelines|rest)\b/;
+/** A local build-gate stop: a `## Build` section listing at least one real diagnostic code, and the "not clean" verdict. */
+const LOCAL_BUILD_STOP_RE = /## Build\b[\s\S]*\b[A-Z]{2,3}\d{4}\b[\s\S]*(not clean|unknown build is not a clean build|build cannot run)/i;
+/** A pr-mode stop: the validation build is not green. */
+const PR_BUILD_STOP_RE = /validation build[^\n]{0,120}\b(red|fail|failed|failing|queued|running|rejected|broken|expired|not green|no validation build)\b/i;
 /** BCQuality Entry answered with nothing to dispatch (or could not route) — pasted into the report. */
 const NO_DISPATCH_RE = /outcome["'\s:]*["']?(no-match|failed)\b/i;
 /** Only a read of every leaf file counts as reading every leaf; listing the folder does not. */
@@ -225,10 +227,13 @@ export function evaluate({ calls, handback = '', lastText = '' }, leaves = DEFAU
     const report = handback || lastText || '';
     const inputs = calls.map((c) => JSON.stringify(c.input)).join('\n');
 
-    // Stopped at the build gate: the rulebook skill ran, the rulebook itself was never opened,
-    // and the report says the build stopped it. "No rulebook, no findings" - nothing after it.
+    // Stopped at the build gate: the rulebook skill ran, a build was actually run, and the report
+    // shows the build verdict that stopped it (diagnostic codes, or a red validation build).
+    // "No rulebook, no findings" - nothing is owed after it. Whether the agent had already
+    // opened the rulebook does not matter; what matters is the evidence of the build.
     const rulebookRan = calls.some((c) => PASSES[0].skill.test(skillName(c)) && !c.isError);
-    if (rulebookRan && !RULEBOOK_READ_RE.test(inputs) && BUILD_STOP_RE.test(report)) { return []; }
+    const buildRan = calls.some((c) => c.name !== 'Skill' && BUILD_TOOL_RE.test(`${c.name} ${JSON.stringify(c.input)}`));
+    if (rulebookRan && buildRan && (LOCAL_BUILD_STOP_RE.test(report) || PR_BUILD_STOP_RE.test(report))) { return []; }
 
     for (const pass of PASSES) {
         const attempts = calls.filter((c) => pass.skill.test(skillName(c)));

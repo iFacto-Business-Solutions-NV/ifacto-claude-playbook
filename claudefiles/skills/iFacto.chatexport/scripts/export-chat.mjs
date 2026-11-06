@@ -456,7 +456,9 @@ export function loadSubagents(session) {
 
         const entries = readLines(join(dir, name));
         const texts = [];
+        const skills = new Set();
         let prompt = '';
+        let handback = null;
         let toolCalls = 0, thinkingBlocks = 0, start = null, end = null;
 
         for (const e of entries) {
@@ -465,7 +467,13 @@ export function loadSubagents(session) {
             if (e.type === 'assistant') {
                 for (const block of contentBlocks(e)) {
                     if (block.type === 'text' && block.text) { texts.push(block.text); }
-                    if (block.type === 'tool_use') { toolCalls++; }
+                    if (block.type === 'tool_use') {
+                        toolCalls++;
+                        // Since Claude Code 2.1.31x a sub-agent delivers its final report through
+                        // the SubagentHandback tool, not as a text block: that call IS the report.
+                        if (block.name === 'SubagentHandback') { handback = String(block.input?.message ?? ''); }
+                        if (block.name === 'Skill' && block.input?.skill) { skills.add(String(block.input.skill)); }
+                    }
                     if (block.type === 'thinking') { thinkingBlocks++; }
                 }
             }
@@ -479,7 +487,8 @@ export function loadSubagents(session) {
             spawnDepth: sidecar.spawnDepth ?? null,
             prompt,
             texts,
-            report: texts.at(-1) || '',
+            report: handback || texts.at(-1) || '',
+            skills: [...skills],
             toolCalls,
             thinkingBlocks,
             start,
@@ -535,15 +544,24 @@ export function mcpNamesFrom(att) {
 }
 
 /** Split skill names into iFacto's own (the ones we can fix) and the rest. */
+/** iFacto's own skills (`iFacto.x`, `iFacto-x`, `ifacto:x`) plus BCQuality's: the agents are told to invoke them, so they must be visible by name. */
+const isOurSkill = (name) => /^(ifacto[.:-]|bcquality)/i.test(name);
+
+/** Split skill names into ours (listed one by one in the diagnose) and others (collapsed). */
 export function partitionSkills(names) {
     const all = [...names].sort((a, b) => a.localeCompare(b));
     return {
-        ours: all.filter((n) => n.toLowerCase().startsWith('ifacto.')),
-        others: all.filter((n) => !n.toLowerCase().startsWith('ifacto.')),
+        ours: all.filter(isOurSkill),
+        others: all.filter((n) => !isOurSkill(n)),
     };
 }
 
-export function collectCapabilities(session) {
+/**
+ * @param subagents  loadSubagents() output — a skill invoked inside a sub-agent counts as
+ *                   used, and skillsUsedBy says in which agent type(s). Without this the
+ *                   diagnose report lists the reviewer's own skills as "never invoked".
+ */
+export function collectCapabilities(session, subagents = []) {
     const skillsOffered = new Set();
     for (const listing of session.capabilityRaw.skillListings) {
         for (const name of asList(listing.names)) { skillsOffered.add(name); }
@@ -568,10 +586,20 @@ export function collectCapabilities(session) {
         }
     }
 
+    const skillsUsedBy = new Map();
+    for (const sub of subagents) {
+        for (const skill of sub.skills || []) {
+            skillsUsed.add(skill);
+            const by = skillsUsedBy.get(skill) || new Set();
+            by.add(sub.agentType);
+            skillsUsedBy.set(skill, by);
+        }
+    }
+
     const skillsUnused = new Set([...skillsOffered].filter((s) => !skillsUsed.has(s)));
     const mcpUnused = new Set([...mcpConnected].filter((s) => !mcpUsed.has(s)));
 
-    return { skillsOffered, skillsUsed, skillsUnused, mcpConnected, mcpUsed, mcpUnused, toolFrequency };
+    return { skillsOffered, skillsUsed, skillsUsedBy, skillsUnused, mcpConnected, mcpUsed, mcpUnused, toolFrequency };
 }
 
 /* ==================================================================== */
@@ -1024,7 +1052,10 @@ export function renderDiagnose(ctx) {
 
     if (caps.skillsUsed.size) {
         out.push('Used:', '');
-        for (const skill of [...caps.skillsUsed].sort()) { out.push(`- ✅ \`${cell(skill)}\``); }
+        for (const skill of [...caps.skillsUsed].sort()) {
+            const by = caps.skillsUsedBy?.get(skill);
+            out.push(`- ✅ \`${cell(skill)}\`${by ? ` — in sub-agent ${[...by].map((a) => `\`${cell(a)}\``).join(', ')}` : ''}`);
+        }
         out.push('');
     }
     if (caps.skillsUnused.size) {
@@ -1086,9 +1117,10 @@ export function renderDiagnose(ctx) {
     out.push('');
 
     if (subagents.length) {
-        out.push('## Sub-agents', '', '| Type | Assignment | Tool calls |', '|---|---|---|');
+        out.push('## Sub-agents', '', '| Type | Assignment | Tool calls | Skills invoked |', '|---|---|---|---|');
         for (const sub of subagents) {
-            out.push(`| \`${cell(sub.agentType)}\` | ${cell(S(sub.description))} | ${sub.toolCalls} |`);
+            const skills = (sub.skills || []).map((s) => `\`${cell(s)}\``).join(', ') || '—';
+            out.push(`| \`${cell(sub.agentType)}\` | ${cell(S(sub.description))} | ${sub.toolCalls} | ${skills} |`);
         }
         out.push('');
     }
@@ -1281,7 +1313,7 @@ export function main(argv = process.argv.slice(2)) {
     if (!session.turns.length) { log('This session has no human turns.'); return 3; }
 
     const subagents = loadSubagents(session);
-    const caps = collectCapabilities(session);
+    const caps = collectCapabilities(session, subagents);
     const stats = analyze(session, subagents);
     const S = buildSanitizer(cfg.sanitize, cfg.redactions);
     const ctx = { session, subagents, stats, caps, S };

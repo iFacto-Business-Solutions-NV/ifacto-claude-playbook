@@ -7,7 +7,9 @@ description: 'Review AL code for BC-specific security risks (SecretText, Isolate
 
 ## When to Use
 
-Invoke this skill whenever the work touches a security-sensitive AL primitive — credentials, permissions, web services, PII, telemetry — or whenever a security-focused review is requested.
+In `design` and `code` mode: invoke this skill whenever the work touches a security-sensitive AL primitive — credentials, permissions, web services, PII, telemetry — or whenever a security-focused review is requested.
+
+In `review` mode the skill is **unconditional**: `iFacto.CodeReviewer` runs it on every review, whatever the diff contains. The trigger list below is not a gate for review mode — do not scan the diff for these constructs to decide whether the pass is needed, and never replace the pass with such a scan. A diff that touches none of them still gets the pass; its report then says so per category.
 
 Trigger constructs include: `SecretText`, `IsolatedStorage`, `HttpClient`, `permissionset`, `entitlement`, `InherentPermissions`, `InherentEntitlements`, `DataClassification`, `SetFilter` with user input, `Session.LogMessage`, `FeatureTelemetry`, `OnCompanyOpen`, install/upgrade codeunits, API pages, SOAP/OData exposure.
 
@@ -89,6 +91,8 @@ Pick the mode that matches the calling context. The mechanics are similar — wh
 ### Mode: `review` (used by iFacto.CodeReviewer)
 
 **Goal:** validate finished code against iFacto security standards. Produce a pass/fail report. Critical findings block merge.
+
+This mode always runs all five steps below. It is never skipped because the rulebook or the BCQuality technical pass "already covered" security, and never shortened to a grep of the diff for `SecretText`, `HttpClient`, `IsolatedStorage` or `permissionset`: that is not a security review and must not be reported as one.
 
 1. Determine review scope (changed files on current branch, or user-supplied file list)
 2. Follow `iFacto.al-build-validation` skill in diagnostics-only mode to collect CodeCop / AppSourceCop / PerTenantExtensionCop output (some security issues are flagged by rulesets)

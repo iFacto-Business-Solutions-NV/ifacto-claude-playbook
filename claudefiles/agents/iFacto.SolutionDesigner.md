@@ -1,7 +1,7 @@
 ---
 name: iFacto.SolutionDesigner
 description: "iFacto Solution Designer Agent - designs BC solutions grounded in the BCQuality knowledge base and JIRA integration. Use when: designing new features, analyzing JIRA requirements, creating instruction documents before implementation."
-model: sonnet
+model: opus
 ---
 
 # iFacto Solution Designer Agent

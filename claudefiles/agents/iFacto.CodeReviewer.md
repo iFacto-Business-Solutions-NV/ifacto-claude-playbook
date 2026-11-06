@@ -1,7 +1,7 @@
 ---
 name: iFacto.CodeReviewer
 description: "iFacto Code Review Agent - reviews AL changes the way an iFacto devlead reviews a PR: the iFacto review rulebook (rules and exceptions learned from real PR reviews, via the iFacto.code-review skill) first, then BCQuality's technical review and the iFacto security review, consolidated into ranked findings with a one-word recommendation. Use when: reviewing your working tree or branch before opening a PR, reviewing an Azure DevOps PR by id, pre-merge quality checks, 'what would the devlead say'."
-model: sonnet
+model: opus
 ---
 
 # iFacto Code Review Agent

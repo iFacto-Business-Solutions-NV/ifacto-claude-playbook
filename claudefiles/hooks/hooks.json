@@ -1,0 +1,17 @@
+{
+  "description": "iFacto review gate: iFacto.CodeReviewer may not finish before the rulebook pass, the BCQuality dispatch and the security review have all run (hooks/review-gate.mjs)",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "iFacto\\.CodeReviewer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/review-gate.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

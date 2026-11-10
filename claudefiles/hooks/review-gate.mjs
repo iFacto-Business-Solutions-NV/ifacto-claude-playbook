@@ -50,23 +50,30 @@ export const DEFAULT_LEAVES = [
     'al-appsource-review', 'al-telemetry-review', 'al-scm-review', 'al-finance-review',
 ];
 
+// A pass is "invoked" by a Skill call (`skill`) OR by reading the skill's own instructions (`read`):
+// where BCQuality is installed as the Playbook's clone (~/.ifacto-playbook/bcquality/<profile>)
+// instead of as a plugin, there is no `bcquality:al-code-review` Skill to call - the agent reads
+// SKILL.md / entry.md and follows them, which is the same procedure (seen 2026-11-07).
 export const PASSES = [
     {
         id: 'rulebook',
         label: 'iFacto review rulebook',
         skill: /(^|[:/])iFacto[.-]code-review$/i,
+        read: /iFacto[.-]code-review[\\/]+SKILL\.md/i,
         instruction: 'invoke the `iFacto.code-review` skill with the Skill tool and follow it end to end (build gate, Jira requirement, rulebook, finding gate).',
     },
     {
         id: 'bcquality',
         label: 'BCQuality technical review',
         skill: /(^|[:/])(al-code-review|bcquality-al-review)$/i,
+        read: /bcquality[^\n"]*?[\\/]+skills[\\/]+(al-code-review[\\/]+SKILL\.md|entry\.md)/i,
         instruction: 'invoke the `al-code-review` skill of the BCQuality plugin (`bcquality:al-code-review`) with the Skill tool, let Entry route it, and execute the whole dispatch: every leaf skill of the `al-code-review` super-skill, each against the changed files, on every enabled layer (microsoft, community, custom).',
     },
     {
         id: 'security',
         label: 'security review',
         skill: /(^|[:/])iFacto[.-]al-security-review$/i,
+        read: /iFacto[.-]al-security-review[\\/]+SKILL\.md/i,
         instruction: 'invoke the `iFacto.al-security-review` skill with the Skill tool in `review` mode on the changed files. A manual scan of the diff for secrets, HttpClient or permissions is not that pass.',
     },
 ];
@@ -154,6 +161,23 @@ export function transcriptPathOf(input) {
 
 const skillName = (call) => (call.name === 'Skill' ? String(call.input?.skill ?? call.input?.name ?? '') : '');
 
+/** A shell command that reads a file's content (not one that only lists or finds it). */
+const READ_VERB_RE = /(^|[\s;&|(])(cat|sed|head|tail|less|more|awk|Get-Content|gc|type)\b/;
+
+/** The path a call reads, when it reads one: the Read tool's file_path, or a reading shell command. */
+function readTarget(call) {
+    if (call.name === 'Read') { return String(call.input?.file_path ?? ''); }
+    if (call.name === 'Bash' || call.name === 'PowerShell') {
+        const command = String(call.input?.command ?? '');
+        return READ_VERB_RE.test(command) ? command : '';
+    }
+    return '';
+}
+
+/** Did this call invoke the pass: a Skill call by name, or a read of the skill's own instructions? */
+export const invokes = (call, pass) =>
+    pass.skill.test(skillName(call)) || (!!pass.read && pass.read.test(readTarget(call)));
+
 /* ==================================================================== */
 /* BCQuality leaves — from the installed plugin when it can be found     */
 /* ==================================================================== */
@@ -231,12 +255,12 @@ export function evaluate({ calls, handback = '', lastText = '' }, leaves = DEFAU
     // shows the build verdict that stopped it (diagnostic codes, or a red validation build).
     // "No rulebook, no findings" - nothing is owed after it. Whether the agent had already
     // opened the rulebook does not matter; what matters is the evidence of the build.
-    const rulebookRan = calls.some((c) => PASSES[0].skill.test(skillName(c)) && !c.isError);
+    const rulebookRan = calls.some((c) => invokes(c, PASSES[0]) && !c.isError);
     const buildRan = calls.some((c) => c.name !== 'Skill' && BUILD_TOOL_RE.test(`${c.name} ${JSON.stringify(c.input)}`));
     if (rulebookRan && buildRan && (LOCAL_BUILD_STOP_RE.test(report) || PR_BUILD_STOP_RE.test(report))) { return []; }
 
     for (const pass of PASSES) {
-        const attempts = calls.filter((c) => pass.skill.test(skillName(c)));
+        const attempts = calls.filter((c) => invokes(c, pass));
         if (!attempts.length) {
             missing.push({ ...pick(pass), reason: 'never invoked' });
             continue;

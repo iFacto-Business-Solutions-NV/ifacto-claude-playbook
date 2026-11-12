@@ -1,6 +1,6 @@
 ---
 name: iFacto.base-app-source
-description: 'Look up how the Microsoft Business Central base application actually implements something — the real procedure body, who calls or subscribes to what, the exact signature of an event, what changed between versions — through the bc-code-atlas MCP server (Stefan Maron, hosted, w1-28 by default). Use when: writing an event subscriber, mirroring or extending base-app logic, designing against standard behaviour, documenting what BC does out of the box, answering "what does the base app do before/after X", "who subscribes to OnBefore...", "show me Sales-Post.PostSalesDoc". Covers every access path (Claude Code direct server, Claude Code via the bc-observatory plugin, GitHub Copilot) and how to install the server when no bcatlas_ tool is present. Use from iFacto.ALCoder, iFacto.SolutionDesigner, iFacto.SDD, iFacto.Documentation, iFacto.codebase-reconnaissance and iFacto.impact-analysis.'
+description: 'Look up how the Microsoft Business Central base application actually implements something: the real procedure body, who calls or subscribes to what, the exact signature of an event, what changed between versions, through the bc-code-atlas MCP server (Stefan Maron, hosted, w1-28 by default). Use when: writing an event subscriber, mirroring or extending base-app logic, designing against standard behaviour, documenting what BC does out of the box, answering "what does the base app do before/after X", "who subscribes to OnBefore...", "show me Sales-Post.PostSalesDoc". Covers every access path (Claude Code via the ifacto plugin, which brings the server by default; Claude Code direct server; Claude Code via the bc-observatory plugin; GitHub Copilot) and what to do when no bcatlas_ tool is present. Use from iFacto.ALCoder, iFacto.SolutionDesigner, iFacto.SDD, iFacto.Documentation, iFacto.codebase-reconnaissance and iFacto.impact-analysis.'
 ---
 
 # Base-Application Source Lookup (via BC Code Atlas)
@@ -34,21 +34,27 @@ dependencies. Those stay with `ms-dynamics-smb.al/al_symbolsearch`,
 `al-mcp-server/al_find_references` and the `iFacto.codebase-reconnaissance` /
 `iFacto.impact-analysis` skills. DistriApps behaviour comes from `iFacto.DistriQuestions`.
 
-## Reaching the atlas — three access paths
+## Reaching the atlas - four access paths
 
 All paths hit the same hosted server (`https://bc-code-atlas.stefanmaron.dev/mcp`, public,
 no authentication). Hosts prefix the tool names differently; the bare `bcatlas_` name is unique.
 
 | Host | How it is connected | Tool name you will see |
 |------|---------------------|------------------------|
-| Claude Code, direct server (what the iFacto Playbook extension installs) | `claude mcp add --transport http bc-code-atlas <url>` at user scope | `mcp__bc-code-atlas__bcatlas_search` |
+| Claude Code via the iFacto plugin (default) | the `ifacto` plugin ships `bc-code-atlas` in its `.mcp.json`; every developer with the plugin has it | `mcp__plugin_ifacto_bc-code-atlas__bcatlas_search` |
+| Claude Code, direct server (what the iFacto Playbook extension used to install) | `claude mcp add --transport http bc-code-atlas <url>` at user scope | `mcp__bc-code-atlas__bcatlas_search` |
 | Claude Code via the community `bc-observatory` plugin | the plugin bundles the atlas next to `bc-observatory` | `mcp__plugin_bc-observatory_bc-code-atlas__bcatlas_search` |
 | GitHub Copilot in VS Code | `servers.bc-code-atlas` (type `http`) in the user `mcp.json` | `bcatlas_search` with the host's `mcp_` prefix |
 
-**Use whichever the current session actually exposes** — list your tools, do not assume a
-prefix from this table. Use **one** connection, never two: if both the plugin and the direct
-server are present, the tools are duplicated — say so, use either, and tell the developer to
-remove one.
+**Use whichever the current session actually exposes**: list your tools, do not assume a
+prefix from this table. You normally see **one** set of `bcatlas_` tools even when the server
+is configured in several places: Claude Code connects once per endpoint and matches plugin
+servers by URL, so a server at the same URL in a higher-precedence scope (local, project,
+user) wins over the plugin's copy. A developer who also has the direct server from the
+extension therefore gets the `mcp__bc-code-atlas__` names, not the plugin ones. The docs do
+not say which plugin wins when two plugins (for example `ifacto` and `bc-observatory`) declare
+the same URL; whichever one the session lists is the one to use. Only if you really see two
+sets of `bcatlas_` tools: use either, and mention it to the developer.
 
 ### Required toolset gate — `bc-code-atlas`
 
@@ -61,9 +67,13 @@ ask whether to continue with a degraded toolset. As a subagent: end the run with
 
 What unblocks it:
 
-- **iFacto Playbook extension** (preferred): `iFacto: Install MCP Servers (Claude Code CLI only)`
-  or `iFacto: Install MCP Servers (GitHub Copilot only)` — `bc-code-atlas` is enabled in every profile.
-- **Claude Code by hand:**
+- **The ifacto plugin brings it** (Claude Code, default): check that the plugin is installed
+  and enabled (`/plugin`, plugin `ifacto` from marketplace `ifacto-playbook`) and that the
+  server `plugin:ifacto:bc-code-atlas` is not toggled off in `/mcp`. Nothing else to install.
+- **iFacto Playbook extension** (fallback): `iFacto: Install MCP Servers (Claude Code CLI only)`
+  or `iFacto: Install MCP Servers (GitHub Copilot only)`; `bc-code-atlas` is enabled in every
+  profile. This is also the route for GitHub Copilot.
+- **Claude Code by hand** (fallback):
 
   ```
   claude mcp add --scope user --transport http bc-code-atlas https://bc-code-atlas.stefanmaron.dev/mcp

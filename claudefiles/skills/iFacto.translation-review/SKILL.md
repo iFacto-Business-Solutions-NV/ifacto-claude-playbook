@@ -30,7 +30,7 @@ Without it there is no `.g.xlf` — stop and say so; adding it is a code change 
 | 3. Terms round — optional | customer | chooses the terms in Excel first, only when asked for |
 | 4. Review | Claude (subagents) | a verdict and a proposal for every string, with the glossary |
 | 5. Customer round | customer | checks the texts in Excel, starting with the focus rows |
-| 6. Import | Claude | validates the workbook and rewrites the XLF files |
+| 6. Import | Claude | validates the workbook and writes the changed strings into the XLF files |
 | 7. Build and hand over | developer | compile, then `/iFacto.Pullrequest` |
 
 **Two scopes.** A **full round** reviews the whole app on `origin/master`, and its import goes on a
@@ -265,14 +265,18 @@ Report per language: rows, proposals taken, texts changed by the customer, and:
 
 Then run it without `--dry-run`. Every language is built before any file is written.
 
-- **Full round:** add `--allow-drop` once the dropped list is confirmed; the import refuses to drop
-  translations without it. Each translation file is rewritten from the `.g.xlf`: every string in
-  `.g.xlf` order, untouched translations kept byte for byte, strings missing so far added,
-  dropped ones gone.
-- **Feature mode:** only the scope changes. A string of the scope is rebuilt from the `.g.xlf` in
-  its place, or added after the nearest string before it. Everything else stays byte for byte:
-  other features' strings, orphans and the order. Nothing is dropped, so `--allow-drop` is not
-  needed.
+In both modes an existing translation file is changed in place. A string is rewritten only when
+its English, its translation or its state changes. Every other string stays byte for byte, in
+the file's own order and layout. A string the file lacks is added after the nearest string
+before it in the `.g.xlf`. It is laid out like the rest of the file: the target goes on the
+source's line when the file puts it there. The stats count the strings that were `replaced`,
+`inserted` and left `untouched`.
+
+- **Full round:** every string of the `.g.xlf` is in the round, and dropped ones are removed. Add
+  `--allow-drop` once the dropped list is confirmed; the import refuses to drop translations
+  without it.
+- **Feature mode:** only the scope changes: other features' strings, orphans and the order stay
+  as they are. Nothing is dropped, so `--allow-drop` is not needed.
 
 The glossary goes into `<App>/translation-glossary.json` when a term changed, so the next round
 starts from the same terms. Unchanged terms leave the file as it is.
@@ -290,8 +294,9 @@ The remarks (`Opmerking`) are in the report. Read them before the commit:
 
 - Compile again: 0 errors.
 - `git diff --stat`: only `Translations/*.xlf` and `translation-glossary.json`. Restore anything
-  else the build rewrote (report layouts, for instance). In the feature mode the diff of a
-  translation file holds only the branch's strings.
+  else the build rewrote (report layouts, for instance). The diff of a translation file holds
+  only the strings that changed; in the feature mode, only the branch's strings. If the diff
+  covers the whole file, something else rewrote it: find out what before the commit.
 - Do not commit. The developer continues with `/iFacto.Pullrequest`.
 
 ## Hard rules
@@ -318,5 +323,9 @@ The remarks (`Opmerking`) are in the report. Read them before the commit:
 - **Style is not validated.** The import checks what breaks Business Central; capitals or
   wording the customer typed go in as typed.
 - **States.** A translation file that uses `state` attributes gets `translated` for every
-  imported text and `needs-translation` for new strings; a file without states stays without.
+  changed text and `needs-translation` for new strings. A file without states stays without,
+  also when another language uses them. A new language file uses states when the other files do.
+- **Order and notes.** The file's order wins: a file that is not in `.g.xlf` order stays that
+  way. A string that is not rewritten keeps its notes; only rewritten and added strings take the
+  notes of the `.g.xlf`.
 - **Headers.** The import reads the workbook by column name: renamed or deleted headers stop it.

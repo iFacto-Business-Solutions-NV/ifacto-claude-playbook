@@ -1,9 +1,10 @@
 // xlf.mjs — read XLIFF 1.2 files the AL compiler generates, and write a target-language file
 // from the generated .g.xlf plus decisions.
 //
-// Part of the iFacto.translation-review skill. Text-level on purpose: a translation file is
-// rewritten as the .g.xlf lays it out (same units, same order, same notes), with every
-// untouched target kept byte for byte, so the diff a developer reviews holds only what changed.
+// Part of the iFacto.translation-review skill. Text-level on purpose: an existing translation
+// file is changed in place. Only the units whose English, translation or state change are
+// rewritten. Every other unit, the order of the units and the layout stay byte for byte, so
+// the diff a developer reviews holds only what changed.
 
 const NAB_TAG = /^\[NAB: (NOT TRANSLATED|REVIEW|SUGGESTION)\]\s?/;
 
@@ -82,14 +83,41 @@ export function parseXlf(text) {
     };
 }
 
+/** States of a finished translation: a decision equal to its text leaves the unit as it is. */
+const DONE = new Set(['translated', 'final', 'signed-off']);
+
 /**
- * The trans-unit block of the generated unit `u` for a target file: g's source and notes, and
- * the target from `decisions`, else the existing target of `old` (marked needs-adaptation when
- * the English changed and the file uses states), else none. Counts into `ctx.stats` and
- * `ctx.stale`.
+ * True when the unit `old` of a target file already says what a rebuild of the generated unit
+ * `u` would say. That means the same English, the same translate flag, and either no decision
+ * or a decision equal to its translation in a finished state. In a file without states,
+ * "finished" means no state at all. Such a unit is kept as it stands, layout and notes included.
+ */
+function unchangedUnit(u, old, decisions, states) {
+    if (!old || old.source !== u.source || old.translate !== u.translate) { return false; }
+    if (!u.translate || !decisions.has(u.id)) { return true; }
+    return decisions.get(u.id) === old.target && (states ? DONE.has(old.state) : old.state === null);
+}
+
+/**
+ * How the file `parsed` puts a <target> after its <source>. It returns the spaces between the
+ * two when the target sits on the source's line (often none). It returns null when the target
+ * starts a line of its own, and for a file that has no target yet.
+ */
+function targetGap(parsed) {
+    const u = parsed?.units.find((x) => x.targetRaw);
+    const m = u && /(?:<source\b[^>]*\/>|<\/source>)([ \t]*)<target\b/.exec(u.raw);
+    return m ? m[1] : null;
+}
+
+/**
+ * The trans-unit block of the generated unit `u` for a target file. It takes g's source and
+ * notes. The target comes from `decisions`, else from the existing target of `old` (marked
+ * needs-adaptation when the English changed and the file uses states), else there is none.
+ * The target goes on the source's line when `ctx.gap` is a string, else on a line of its own.
+ * Counts into `ctx.stats` and `ctx.stale`.
  */
 function unitBlock(u, old, decisions, ctx) {
-    const { eol, states, stats, stale } = ctx;
+    const { eol, states, stats, stale, gap } = ctx;
     const targetXml = (text, state) => (states ? `<target state="${state}">${escapeXml(text)}</target>` : `<target>${escapeXml(text)}</target>`);
     let block = u.raw.replace(/\r?\n/g, eol);
     if (!u.translate) { return block; }
@@ -115,7 +143,7 @@ function unitBlock(u, old, decisions, ctx) {
         const sm = /^([ \t]*)(?:<source\b[^>]*\/>|<source\b[^>]*>[\s\S]*?<\/source>)/m.exec(block);
         if (!sm) { throw new Error(`trans-unit ${u.id} has no <source>`); }
         const at = sm.index + sm[0].length;
-        block = `${block.slice(0, at)}${eol}${sm[1]}${target}${block.slice(at)}`;
+        block = `${block.slice(0, at)}${gap ?? `${eol}${sm[1]}`}${target}${block.slice(at)}`;
     }
     return block;
 }
@@ -127,92 +155,108 @@ function unitSeparator(parsed, eol) {
 }
 
 /**
- * The text of a target-language file built from the generated file `g`:
- *   - every unit of g, in g's order, with g's source and notes;
- *   - the target from `decisions` (Map id → text) when there is one;
- *   - else the existing target of `current` (parsed target file or null), kept as it was —
- *     marked needs-adaptation when the English changed since and the file uses states;
- *   - else no target (or an empty needs-translation target when the file uses states).
- * Units of `current` that g no longer has are dropped. Returns { text, stats, stale, dropped }:
- * `stale` lists the kept translations whose English changed (marked only when the file uses
- * states), `dropped` the ids that were in `current` and are gone.
+ * Writes `decisions` into the existing file `current` (at least one unit) in place:
+ *   - a unit of g that `current` has is rewritten only when it changes (see unchangedUnit);
+ *     otherwise it stays byte for byte, in its place;
+ *   - a unit of g that `current` lacks goes after the nearest unit before it in g's order that
+ *     `current` has (before the first unit when there is none), laid out like the file;
+ *   - the text around and between the units is kept.
+ * `scope` (a Set of ids, or null for every unit of g) limits what is written; `drop` removes the
+ * units g no longer has. Counts the replaced, inserted and untouched units into `ctx.stats`.
  */
-export function buildTargetXlf(g, current, decisions, { lang, useStates }) {
-    const eol = current?.eol ?? g.eol;
-    const bom = current ? current.bom : g.bom;
-    const states = current ? (current.usesStates || useStates) : useStates;
-    const existing = new Map((current?.units ?? []).map((u) => [u.id, u]));
-    const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0 };
-    const stale = [];
-    const ctx = { eol, states, stats, stale };
-
-    const blocks = g.units.map((u) => unitBlock(u, existing.get(u.id), decisions, ctx));
-    const gIds = new Set(g.units.map((u) => u.id));
-    const dropped = [...existing.keys()].filter((id) => !gIds.has(id));
-    stats.dropped = dropped.length;
-
-    // The frame (xliff, file, body, group) comes from the current file, or from g with the
-    // target language set; the units in between are rebuilt.
-    let frame = current && current.units.length ? current.text : g.text;
-    if (!current || !current.units.length) {
-        frame = frame.replace(/(<file\b[^>]*?\btarget-language=")[^"]*(")/, `$1${lang.toLowerCase()}$2`);
-        if (current?.eol && current.eol !== g.eol) { frame = frame.replace(/\r?\n/g, eol); }
-    }
-    frame = frame.replace(/^﻿/, '');
-    const fp = parseXlf(frame);
-    const first = fp.units[0];
-    const last = fp.units.at(-1);
-    const separator = unitSeparator(fp, eol);
-    const text = `${bom ? '﻿' : ''}${frame.slice(0, first.start)}${blocks.join(separator)}${frame.slice(last.end)}`;
-    return { text, stats, stale, dropped };
-}
-
-/**
- * The feature mode of buildTargetXlf: only the units in `scope` (a Set of ids) change, the rest
- * of `current` stays byte for byte — every other unit, the order, the frame, nothing dropped.
- *   - a scoped unit `current` has is rebuilt from g in its place, as buildTargetXlf would;
- *   - a scoped unit `current` lacks is added after the nearest unit before it in g's order
- *     that `current` has (before the first unit when there is none).
- * The file keeps its own convention: `state` attributes only when it already uses them.
- * `current` must be an existing file with at least one unit. Returns { text, stats, stale,
- * dropped } like buildTargetXlf; `dropped` is always empty, and `stats` also counts the
- * replaced, inserted and untouched units.
- */
-export function patchTargetXlf(g, current, decisions, { scope }) {
-    if (!current?.units.length) { throw new Error('patchTargetXlf needs an existing translation file with at least one unit'); }
-    const eol = current.eol;
-    const states = current.usesStates;
-    const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0, replaced: 0, inserted: 0, untouched: 0 };
-    const stale = [];
-    const ctx = { eol, states, stats, stale };
-    const at = new Map(current.units.map((u, i) => [u.id, i]));
+function mergeIntoFile(g, current, decisions, ctx, { scope, drop }) {
+    const { stats } = ctx;
+    const { text: old, units } = current;
+    const at = new Map(units.map((u, i) => [u.id, i]));
     const replace = new Map();
     const insert = new Map(); // index in current → blocks added after it; -1 = before the first unit
     let anchor = -1;
     for (const u of g.units) {
         const i = at.get(u.id);
-        if (scope.has(u.id)) {
-            const block = unitBlock(u, i === undefined ? undefined : current.units[i], decisions, ctx);
+        if (!scope || scope.has(u.id)) {
+            const was = i === undefined ? undefined : units[i];
+            const block = unitBlock(u, was, decisions, ctx);
             if (i === undefined) {
                 if (!insert.has(anchor)) { insert.set(anchor, []); }
                 insert.get(anchor).push(block);
                 stats.inserted++;
-            } else {
+            } else if (!unchangedUnit(u, was, decisions, ctx.states)) {
                 replace.set(i, block);
                 stats.replaced++;
             }
         }
         if (i !== undefined) { anchor = i; }
     }
-    stats.untouched = current.units.length - stats.replaced;
+    const gIds = new Set(g.units.map((u) => u.id));
+    const dropped = drop ? units.filter((u) => !gIds.has(u.id)).map((u) => u.id) : [];
+    const gone = new Set(dropped);
+    stats.untouched = units.length - stats.replaced - dropped.length;
 
-    const { text: old, units } = current;
-    const separator = unitSeparator(current, eol);
-    let text = old.slice(0, units[0].start) + (insert.get(-1) ?? []).map((b) => `${b}${separator}`).join('');
+    // Each piece is [the text before it, the unit]: an original unit keeps the text that stood
+    // before it, an added one gets the file's usual separator.
+    const separator = unitSeparator(current, ctx.eol);
+    const pieces = (insert.get(-1) ?? []).map((b) => [separator, b]);
     units.forEach((u, i) => {
-        text += replace.get(i) ?? old.slice(u.start, u.end);
-        for (const b of insert.get(i) ?? []) { text += `${separator}${b}`; }
-        text += old.slice(u.end, i + 1 < units.length ? units[i + 1].start : old.length);
+        if (!gone.has(u.id)) { pieces.push([i ? old.slice(units[i - 1].end, u.start) : separator, replace.get(i) ?? u.raw]); }
+        for (const b of insert.get(i) ?? []) { pieces.push([separator, b]); }
     });
+    const body = pieces.map(([before, b], k) => (k ? before + b : b)).join('');
+    return { text: old.slice(0, units[0].start) + body + old.slice(units.at(-1).end), dropped };
+}
+
+/**
+ * The text of a target-language file for the generated file `g`, with `decisions` (Map id →
+ * text) written into it.
+ *   - An existing file (`current`, parsed, with units) is changed in place by mergeIntoFile: only
+ *     the units that change are rewritten, from g's source and notes. Every other unit stays byte
+ *     for byte, in the file's own order. A missing unit is added after its predecessor in g, and
+ *     the units g no longer has are dropped. The file keeps its own conventions: state attributes
+ *     only when it already uses them, and the target on the source's line when it puts it there.
+ *   - A new file (`current` null or without units) takes g's frame, units and order, with the
+ *     target language set, and state attributes when `useStates`.
+ * A unit's target comes from its decision, else from the existing target (marked
+ * needs-adaptation when the English changed since and the file uses states), else there is none
+ * (an empty needs-translation target in a new file with states).
+ * Returns { text, stats, stale, dropped }. `stale` lists the kept translations whose English
+ * changed (marked only when the file uses states); `dropped` lists the ids that were in
+ * `current` and are gone.
+ */
+export function buildTargetXlf(g, current, decisions, { lang, useStates }) {
+    const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0, replaced: 0, inserted: 0, untouched: 0 };
+    const stale = [];
+    if (current?.units.length) {
+        const ctx = { eol: current.eol, states: current.usesStates, gap: targetGap(current), stats, stale };
+        const { text, dropped } = mergeIntoFile(g, current, decisions, ctx, { scope: null, drop: true });
+        stats.dropped = dropped.length;
+        return { text, stats, stale, dropped };
+    }
+
+    const eol = current?.eol ?? g.eol;
+    const bom = current ? current.bom : g.bom;
+    const ctx = { eol, states: useStates, gap: null, stats, stale };
+    const blocks = g.units.map((u) => unitBlock(u, undefined, decisions, ctx));
+    stats.inserted = blocks.length;
+    // The frame (xliff, file, body, group) comes from g, with the target language set.
+    let frame = g.text.replace(/(<file\b[^>]*?\btarget-language=")[^"]*(")/, `$1${lang.toLowerCase()}$2`);
+    if (eol !== g.eol) { frame = frame.replace(/\r?\n/g, eol); }
+    frame = frame.replace(/^﻿/, '');
+    const fp = parseXlf(frame);
+    const separator = unitSeparator(fp, eol);
+    const text = `${bom ? '﻿' : ''}${frame.slice(0, fp.units[0].start)}${blocks.join(separator)}${frame.slice(fp.units.at(-1).end)}`;
+    return { text, stats, stale, dropped: [] };
+}
+
+/**
+ * The feature mode of buildTargetXlf: only the units in `scope` (a Set of ids) are written, and
+ * nothing is dropped, not even a unit g no longer has. Everything else in `current` stays byte
+ * for byte. `current` must be an existing file with at least one unit. Returns { text, stats,
+ * stale, dropped } like buildTargetXlf; `dropped` is always empty.
+ */
+export function patchTargetXlf(g, current, decisions, { scope }) {
+    if (!current?.units.length) { throw new Error('patchTargetXlf needs an existing translation file with at least one unit'); }
+    const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0, replaced: 0, inserted: 0, untouched: 0 };
+    const stale = [];
+    const ctx = { eol: current.eol, states: current.usesStates, gap: targetGap(current), stats, stale };
+    const { text } = mergeIntoFile(g, current, decisions, ctx, { scope, drop: false });
     return { text, stats, stale, dropped: [] };
 }

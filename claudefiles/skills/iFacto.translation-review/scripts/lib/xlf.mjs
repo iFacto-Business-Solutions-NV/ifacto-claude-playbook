@@ -83,6 +83,50 @@ export function parseXlf(text) {
 }
 
 /**
+ * The trans-unit block of the generated unit `u` for a target file: g's source and notes, and
+ * the target from `decisions`, else the existing target of `old` (marked needs-adaptation when
+ * the English changed and the file uses states), else none. Counts into `ctx.stats` and
+ * `ctx.stale`.
+ */
+function unitBlock(u, old, decisions, ctx) {
+    const { eol, states, stats, stale } = ctx;
+    const targetXml = (text, state) => (states ? `<target state="${state}">${escapeXml(text)}</target>` : `<target>${escapeXml(text)}</target>`);
+    let block = u.raw.replace(/\r?\n/g, eol);
+    if (!u.translate) { return block; }
+    let target = null;
+    if (decisions.has(u.id)) {
+        target = targetXml(decisions.get(u.id), 'translated');
+        stats.decided++;
+    } else if (old?.targetRaw) {
+        target = old.targetRaw;
+        if (old.source !== u.source) {
+            stats.staleKept++;
+            stale.push({ id: u.id, en: u.source, old: old.source, target: old.target, marked: states });
+            // Only the opening tag changes; the translation text is never touched.
+            if (states) { target = target.replace(/^<target\b([^>]*?)(\/?)>/, (_, attrs, slash) => `<target state="needs-adaptation"${attrs.replace(/\sstate="[^"]*"/, '')}${slash}>`); }
+        } else {
+            stats.kept++;
+        }
+    } else {
+        if (!old) { stats.added++; } else { stats.empty++; }
+        target = states ? '<target state="needs-translation"></target>' : null;
+    }
+    if (target) {
+        const sm = /^([ \t]*)(?:<source\b[^>]*\/>|<source\b[^>]*>[\s\S]*?<\/source>)/m.exec(block);
+        if (!sm) { throw new Error(`trans-unit ${u.id} has no <source>`); }
+        const at = sm.index + sm[0].length;
+        block = `${block.slice(0, at)}${eol}${sm[1]}${target}${block.slice(at)}`;
+    }
+    return block;
+}
+
+/** The text between two trans-units of a parsed file, to lay out an added unit the same way. */
+function unitSeparator(parsed, eol) {
+    const { units, text } = parsed;
+    return units.length > 1 ? text.slice(units[0].end, units[1].start) : `${eol}${/([ \t]*)$/.exec(text.slice(0, units[0].start))[1]}`;
+}
+
+/**
  * The text of a target-language file built from the generated file `g`:
  *   - every unit of g, in g's order, with g's source and notes;
  *   - the target from `decisions` (Map id → text) when there is one;
@@ -100,39 +144,9 @@ export function buildTargetXlf(g, current, decisions, { lang, useStates }) {
     const existing = new Map((current?.units ?? []).map((u) => [u.id, u]));
     const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0 };
     const stale = [];
+    const ctx = { eol, states, stats, stale };
 
-    const targetXml = (text, state) => (states ? `<target state="${state}">${escapeXml(text)}</target>` : `<target>${escapeXml(text)}</target>`);
-
-    const blocks = g.units.map((u) => {
-        let block = u.raw.replace(/\r?\n/g, eol);
-        if (!u.translate) { return block; }
-        const old = existing.get(u.id);
-        let target = null;
-        if (decisions.has(u.id)) {
-            target = targetXml(decisions.get(u.id), 'translated');
-            stats.decided++;
-        } else if (old?.targetRaw) {
-            target = old.targetRaw;
-            if (old.source !== u.source) {
-                stats.staleKept++;
-                stale.push({ id: u.id, en: u.source, old: old.source, target: old.target, marked: states });
-                // Only the opening tag changes; the translation text is never touched.
-                if (states) { target = target.replace(/^<target\b([^>]*?)(\/?)>/, (_, attrs, slash) => `<target state="needs-adaptation"${attrs.replace(/\sstate="[^"]*"/, '')}${slash}>`); }
-            } else {
-                stats.kept++;
-            }
-        } else {
-            if (!old) { stats.added++; } else { stats.empty++; }
-            target = states ? '<target state="needs-translation"></target>' : null;
-        }
-        if (target) {
-            const sm = /^([ \t]*)(?:<source\b[^>]*\/>|<source\b[^>]*>[\s\S]*?<\/source>)/m.exec(block);
-            if (!sm) { throw new Error(`trans-unit ${u.id} has no <source>`); }
-            const at = sm.index + sm[0].length;
-            block = `${block.slice(0, at)}${eol}${sm[1]}${target}${block.slice(at)}`;
-        }
-        return block;
-    });
+    const blocks = g.units.map((u) => unitBlock(u, existing.get(u.id), decisions, ctx));
     const gIds = new Set(g.units.map((u) => u.id));
     const dropped = [...existing.keys()].filter((id) => !gIds.has(id));
     stats.dropped = dropped.length;
@@ -148,7 +162,57 @@ export function buildTargetXlf(g, current, decisions, { lang, useStates }) {
     const fp = parseXlf(frame);
     const first = fp.units[0];
     const last = fp.units.at(-1);
-    const separator = fp.units.length > 1 ? frame.slice(fp.units[0].end, fp.units[1].start) : `${eol}${/([ \t]*)$/.exec(frame.slice(0, first.start))[1]}`;
+    const separator = unitSeparator(fp, eol);
     const text = `${bom ? '﻿' : ''}${frame.slice(0, first.start)}${blocks.join(separator)}${frame.slice(last.end)}`;
     return { text, stats, stale, dropped };
+}
+
+/**
+ * The feature mode of buildTargetXlf: only the units in `scope` (a Set of ids) change, the rest
+ * of `current` stays byte for byte — every other unit, the order, the frame, nothing dropped.
+ *   - a scoped unit `current` has is rebuilt from g in its place, as buildTargetXlf would;
+ *   - a scoped unit `current` lacks is added after the nearest unit before it in g's order
+ *     that `current` has (before the first unit when there is none).
+ * The file keeps its own convention: `state` attributes only when it already uses them.
+ * `current` must be an existing file with at least one unit. Returns { text, stats, stale,
+ * dropped } like buildTargetXlf; `dropped` is always empty, and `stats` also counts the
+ * replaced, inserted and untouched units.
+ */
+export function patchTargetXlf(g, current, decisions, { scope }) {
+    if (!current?.units.length) { throw new Error('patchTargetXlf needs an existing translation file with at least one unit'); }
+    const eol = current.eol;
+    const states = current.usesStates;
+    const stats = { decided: 0, kept: 0, staleKept: 0, added: 0, empty: 0, dropped: 0, replaced: 0, inserted: 0, untouched: 0 };
+    const stale = [];
+    const ctx = { eol, states, stats, stale };
+    const at = new Map(current.units.map((u, i) => [u.id, i]));
+    const replace = new Map();
+    const insert = new Map(); // index in current → blocks added after it; -1 = before the first unit
+    let anchor = -1;
+    for (const u of g.units) {
+        const i = at.get(u.id);
+        if (scope.has(u.id)) {
+            const block = unitBlock(u, i === undefined ? undefined : current.units[i], decisions, ctx);
+            if (i === undefined) {
+                if (!insert.has(anchor)) { insert.set(anchor, []); }
+                insert.get(anchor).push(block);
+                stats.inserted++;
+            } else {
+                replace.set(i, block);
+                stats.replaced++;
+            }
+        }
+        if (i !== undefined) { anchor = i; }
+    }
+    stats.untouched = current.units.length - stats.replaced;
+
+    const { text: old, units } = current;
+    const separator = unitSeparator(current, eol);
+    let text = old.slice(0, units[0].start) + (insert.get(-1) ?? []).map((b) => `${b}${separator}`).join('');
+    units.forEach((u, i) => {
+        text += replace.get(i) ?? old.slice(u.start, u.end);
+        for (const b of insert.get(i) ?? []) { text += `${separator}${b}`; }
+        text += old.slice(u.end, i + 1 < units.length ? units[i + 1].start : old.length);
+    });
+    return { text, stats, stale, dropped: [] };
 }

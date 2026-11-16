@@ -4,7 +4,7 @@
 //
 // Part of the iFacto.translation-review skill. Zero dependencies, Node 18+.
 //
-// Usage:  node translation-review.mjs snapshot     --project <App> [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
+// Usage:  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
 //         node translation-review.mjs terms        --work <dir> [--top 120]
 //         node translation-review.mjs export       --work <dir> --round terms|texts [--out <file.xlsx>]
 //         node translation-review.mjs import-terms --work <dir> --xlsx <file> [--project <App>]
@@ -30,7 +30,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 
 import { readZip } from './lib/zip.mjs';
 import { writeWorkbook, readWorkbook, STYLE } from './lib/xlsx.mjs';
-import { parseXlf, buildTargetXlf, normLang } from './lib/xlf.mjs';
+import { parseXlf, buildTargetXlf, patchTargetXlf, normLang } from './lib/xlf.mjs';
 import { VERDICTS, categoryOf, isFocus, readableContext, placeholdersOf, isBlank, problemsOf } from './lib/rules.mjs';
 
 const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,9 +38,10 @@ const SCHEMA = 1;
 const DEFAULT_CHUNK = 270;
 const SHORT = 60; // reference strings up to this length are kept for term and phrase lookups
 const DONE_STATES = new Set(['translated', 'final', 'signed-off']);
+const BASE_COPY = 'base.g.xlf'; // the feature mode's base, kept in the work folder
 
 const USAGE = `Usage:
-  node translation-review.mjs snapshot     --project <App> [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
+  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
   node translation-review.mjs terms        --work <dir> [--top 120]
   node translation-review.mjs export       --work <dir> --round terms|texts [--out <file.xlsx>]
   node translation-review.mjs import-terms --work <dir> --xlsx <file> [--project <App>]
@@ -57,7 +58,7 @@ export class UsageError extends Error {}
  * Arguments and files
  * ------------------------------------------------------------------ */
 
-const FLAGS = new Set(['dry-run', 'force', 'allow-drop']);
+const FLAGS = new Set(['dry-run', 'force', 'allow-drop', 'full']);
 
 export function parseArgs(argv) {
     const [command, ...rest] = argv;
@@ -128,10 +129,20 @@ function loadWork(opts, { review = false } = {}) {
 const loadReference = (dir) => (existsSync(join(dir, 'reference.json')) ? readJson(join(dir, 'reference.json')) : {});
 const loadGlossary = (dir) => (existsSync(join(dir, 'glossary.json')) ? readJson(join(dir, 'glossary.json')) : null);
 
-/** Keeps the glossary in the customer repo, so the next round starts from the same terms. */
+/**
+ * Keeps the glossary in the customer repo, so the next round starts from the same terms. Unchanged terms are not
+ * rewritten: a new date alone would make every feature PR conflict on this file. Returns the path, or null when
+ * nothing changed.
+ */
 function writeProjectGlossary(projectDir, glossary) {
     const path = join(resolve(projectDir), 'translation-glossary.json');
-    writeJson(path, { schema: SCHEMA, updated: today(), terms: glossary.terms.map(({ origin, ...t }) => t) });
+    const terms = glossary.terms.map(({ origin, ...t }) => t);
+    if (existsSync(path)) {
+        try {
+            if (JSON.stringify(readJson(path).terms ?? null) === JSON.stringify(terms)) { return null; }
+        } catch { /* unreadable: rewrite it */ }
+    }
+    writeJson(path, { schema: SCHEMA, updated: today(), terms });
     return path;
 }
 
@@ -201,13 +212,59 @@ function gitLabel(dir) {
     try { return execFileSync('git', ['-C', dir, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
 }
 
+/** The branch a folder is on ("HEAD" when detached) and the remote's default branch(es); null outside git. */
+function branchOf(dir) {
+    const git = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    let branch;
+    try { branch = git('rev-parse', '--abbrev-ref', 'HEAD'); } catch { return null; }
+    let remoteDefault = null;
+    try { remoteDefault = git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD').replace(/^origin\//, ''); } catch { /* origin/HEAD not set */ }
+    return { branch, defaults: remoteDefault ? [remoteDefault] : ['master', 'main'] };
+}
+
+/**
+ * The feature mode: the units of `g` whose id or English is not in `base` -- the .g.xlf of the commit where the
+ * branch left master (the merge-base). Every other unit belongs to someone else's work. The scope holds Locked
+ * (translate="no") units too, so the import adds them; the counts are of translatable units only.
+ */
+function featureScope(g, gFile, basePath) {
+    if (!existsSync(basePath)) { throw new UsageError(`--base ${basePath} does not exist`); }
+    if (basePath.toLowerCase() === resolve(gFile).toLowerCase()) {
+        throw new UsageError('--base is the project\'s own .g.xlf — pass the .g.xlf of the merge-base with origin/master');
+    }
+    const base = parseXlf(readFileSync(basePath, 'utf8'));
+    if (!base.units.length) { throw new UsageError(`${basePath} holds no trans-units — pass the .g.xlf of the merge-base with origin/master`); }
+    if (base.original && g.original && base.original !== g.original) {
+        throw new UsageError(`--base is the .g.xlf of "${base.original}", the project generates "${g.original}"`);
+    }
+    const baseSource = new Map(base.units.map((u) => [u.id, u.source]));
+    const ids = g.units.filter((u) => baseSource.get(u.id) !== u.source).map((u) => u.id);
+    const translatable = new Set(g.units.filter((u) => u.translate).map((u) => u.id));
+    return {
+        base,
+        ids,
+        added: ids.filter((id) => translatable.has(id) && !baseSource.has(id)).length,
+        changed: ids.filter((id) => translatable.has(id) && baseSource.has(id)).length,
+    };
+}
+
 export function commandSnapshot(opts) {
     const p = projectFiles(need(opts, 'project'), opts.g);
     const dir = resolve(opts.work ?? join(homedir(), 'Downloads', 'translation-review', `${slug(p.app.name)}-${today()}`));
     if (existsSync(join(dir, 'snapshot.json')) && !opts.force) {
         throw new UsageError(`${dir} already holds a snapshot — use a new --work folder, or --force to replace it`);
     }
+    if (opts.base && opts.full) { throw new UsageError('--base (the feature mode) and --full (a round over the whole app) exclude each other'); }
+    // A full round on a feature branch drags every other feature's strings into that branch.
+    if (!opts.base && !opts.full) {
+        const b = branchOf(p.dir);
+        if (b && b.branch !== 'HEAD' && !b.defaults.includes(b.branch)) {
+            throw new UsageError(`${p.dir} is on branch "${b.branch}", not on ${b.defaults.join(' or ')}. For the strings this branch adds or changes: pass --base with the .g.xlf of the merge-base with origin/master (the feature mode, SKILL.md step 1). A round over the whole app runs on a worktree of origin/master; --full only for a repository whose default branch is not ${b.defaults.join(' or ')}`);
+        }
+    }
     const g = parseXlf(readFileSync(p.gFile, 'utf8'));
+    const feature = opts.base ? featureScope(g, p.gFile, resolve(opts.base)) : null;
+    const inScope = feature ? new Set(feature.ids) : null;
     const targets = p.targets.map((path) => {
         const parsed = parseXlf(readFileSync(path, 'utf8'));
         return { path, parsed, lang: langOfFile(path, parsed) };
@@ -221,11 +278,15 @@ export function commandSnapshot(opts) {
         if (!langs.includes(normLang(extra))) { langs.push(normLang(extra)); }
     }
     if (!langs.length) { throw new UsageError(`no target language: ${p.tdir} has no translation file — pass --add-lang <code>`); }
+    if (feature) {
+        const missing = langs.filter((l) => !targets.find((t) => t.lang === l)?.parsed.units.length);
+        if (missing.length) { throw new UsageError(`the feature mode adds to existing translation files, and ${missing.join(', ')} has none with units in ${p.tdir} — a new language is a round over the whole app`); }
+    }
 
     const byLang = Object.fromEntries(langs.map((l) => [l, new Map((targets.find((t) => t.lang === l)?.parsed.units ?? []).map((u) => [u.id, u]))]));
     const units = [];
     for (const u of g.units) {
-        if (!u.translate) { continue; }
+        if (!u.translate || (inScope && !inScope.has(u.id))) { continue; }
         const note = u.notes['Xliff Generator'] ?? '';
         const unit = { id: u.id, src: u.source, note, obj: note.split(' - ')[0], cat: categoryOf(note) };
         if (u.notes.Developer) { unit.dev = u.notes.Developer; }
@@ -240,6 +301,9 @@ export function commandSnapshot(opts) {
             unit.langs[lang] = x;
         }
         units.push(unit);
+    }
+    if (feature && !units.some((u) => !isBlank(u.src))) {
+        throw new UsageError(`this branch adds or changes no translatable string compared to ${resolve(opts.base)} — nothing to review. Check that the branch was compiled and that --base comes from the merge-base with origin/master`);
     }
 
     const packages = opts.packages ? resolve(opts.packages) : join(p.dir, '.alpackages');
@@ -263,10 +327,13 @@ export function commandSnapshot(opts) {
         files: Object.fromEntries(langs.map((l) => [l, targets.find((t) => t.lang === l)?.path ?? null])),
         packages: { dir: existsSync(packages) ? packages : null, read },
     };
+    // The base goes into the work folder: the import needs it after the worktree is gone.
+    if (feature) { snapshot.feature = { base: resolve(opts.base), added: feature.added, changed: feature.changed, ids: feature.ids }; }
     mkdirSync(dir, { recursive: true });
     writeJson(join(dir, 'snapshot.json'), snapshot);
     writeJson(join(dir, 'units.json'), units);
     writeJson(join(dir, 'reference.json'), reference, { compact: true });
+    if (feature) { writeFileSync(join(dir, BASE_COPY), feature.base.text, 'utf8'); } else { rmSync(join(dir, BASE_COPY), { force: true }); }
 
     const gIds = new Set(g.units.map((u) => u.id));
     const perLang = {};
@@ -283,6 +350,8 @@ export function commandSnapshot(opts) {
     }
     return {
         status: 'snapshot',
+        mode: feature ? 'feature' : 'full',
+        ...(feature ? { feature: { base: snapshot.feature.base, added: feature.added, changed: feature.changed, outside: g.units.filter((u) => u.translate && !inScope.has(u.id)).length } } : {}),
         work: dir,
         app: snapshot.app.name,
         commit: snapshot.commit,
@@ -400,30 +469,33 @@ const UITLEG = {
     texts: [
         ['Vertalingen nakijken - teksten', STYLE.title],
         ['Dit bestand bevat de vertaalbare teksten van de app, met een tabblad per taal.'],
-        ['Pas alleen de gele kolommen aan: Definitief en Opmerking. Definitief bevat al ons voorstel; een rij die u niet aanpast, nemen we over zoals ze er staat.'],
+        ['Pas alleen de gele kolommen aan: Definitief en Opmerking. Definitief bevat al ons voorstel; een rij die u niet aanpast, nemen we over zoals ze er staat. Alleen Definitief wordt overgenomen: een opmerking verandert zelf geen tekst.'],
         ['Begin met de filter Focus = Ja: alles wat wij fout of twijfelachtig vinden, en nieuwe teksten op het scherm.'],
         ['Laat %1, %2 ... staan: daar vult Business Central een waarde in. Een backslash (\\) is een nieuwe regel.'],
         ['Oordeel: fout = de huidige vertaling is fout - twijfel = alleen u kunt beslissen - nieuw = er was nog geen vertaling - stijl = kleine correctie, nakijken hoeft niet - ok = goed zoals het is.'],
         ['Sorteren en filteren mag. Verwijder geen rijen of kolommen en wijzig de kolom Engels niet.'],
-        ['Het tabblad Termen toont de vertaling van de kernbegrippen die we overal gebruiken. Niet akkoord met een term? Zet het in de kolom Opmerking van een rij waarin hij voorkomt.'],
+        ['Het tabblad Termen toont de vertaling van de kernbegrippen die we overal gebruiken. Het is ter informatie: wat u daar typt, wordt niet overgenomen.'],
+        ['Niet akkoord met een term? Pas Definitief aan in elke rij waarin hij voorkomt (filter de kolom Definitief op "bevat") en zet in de kolom Opmerking van één van die rijen welke term het moet zijn. Dan gebruiken we die term ook in volgende rondes.'],
         [''],
         ['Vérification des traductions - textes', STYLE.title],
         ["Ce fichier contient les textes traduisibles de l'application, avec un onglet par langue."],
-        ['Modifiez uniquement les colonnes jaunes : Definitief et Opmerking (remarque). Definitief contient déjà notre proposition ; une ligne que vous ne modifiez pas est reprise telle quelle.'],
+        ['Modifiez uniquement les colonnes jaunes : Definitief et Opmerking (remarque). Definitief contient déjà notre proposition ; une ligne que vous ne modifiez pas est reprise telle quelle. Seule la colonne Definitief est reprise : une remarque ne modifie aucun texte.'],
         ['Commencez par le filtre Focus = Ja : tout ce que nous jugeons faux ou douteux, et les nouveaux textes à l\'écran.'],
         ['Laissez %1, %2 ... en place : Business Central y insère une valeur. Une barre oblique inverse (\\) est un saut de ligne.'],
         ['Oordeel : fout = la traduction actuelle est incorrecte - twijfel = à décider par vous - nieuw = pas encore traduit - stijl = petite correction, pas besoin de vérifier - ok = correct tel quel.'],
         ['Vous pouvez trier et filtrer. Ne supprimez ni lignes ni colonnes et ne modifiez pas la colonne Engels.'],
-        ["L'onglet Termen montre la traduction des termes clés utilisée partout. Pas d'accord avec un terme ? Indiquez-le dans la colonne Opmerking d'une ligne où il apparaît."],
+        ["L'onglet Termen montre la traduction des termes clés utilisée partout. Il sert d'information : ce que vous y tapez n'est pas repris."],
+        ["Pas d'accord avec un terme ? Modifiez Definitief dans chaque ligne où il apparaît (filtrez la colonne Definitief sur « contient ») et indiquez dans la colonne Opmerking d'une de ces lignes le terme à utiliser. Nous l'utiliserons aussi lors des prochaines vérifications."],
         [''],
         ['Translation review - texts', STYLE.title],
         ['This file holds the translatable texts of the app, with one tab per language.'],
-        ['Only change the yellow columns: Definitief and Opmerking (remarks). Definitief already holds our proposal; a row you leave untouched is taken as it stands.'],
+        ['Only change the yellow columns: Definitief and Opmerking (remarks). Definitief already holds our proposal; a row you leave untouched is taken as it stands. Only Definitief is imported: a remark changes no text by itself.'],
         ['Start with the filter Focus = Ja: everything we consider wrong or doubtful, and new texts on screen.'],
         ['Leave %1, %2 ... in place: Business Central fills in a value there. A backslash (\\) is a line break.'],
         ['Oordeel: fout = the current translation is wrong - twijfel = only you can decide - nieuw = not translated yet - stijl = small correction, no need to check - ok = right as it is.'],
         ['Sorting and filtering are fine. Do not delete rows or columns, and do not change the Engels column.'],
-        ['The Termen tab shows the translation of the key terms used throughout. Disagree with a term? Say so in the Opmerking column of a row where it appears.'],
+        ['The Termen tab shows the translation of the key terms used throughout. It is for information: nothing you type there is imported.'],
+        ['Disagree with a term? Change Definitief in every row where it appears (filter the Definitief column on "contains") and say in the Opmerking column of one of those rows which term it should be. We then use that term in later rounds too.'],
     ],
 };
 
@@ -442,6 +514,7 @@ const metaSheet = (work, round) => ({
         ['round', round],
         ['app', work.snapshot.app.name],
         ['snapshot', work.snapshot.commit ?? ''],
+        ['scope', work.snapshot.feature ? 'feature' : 'full'],
         ['created', today()],
         ['languages', work.langs.join(',')],
     ],
@@ -855,6 +928,10 @@ export function commandImport(opts) {
     }
     const warnings = [];
     if (!meta) { warnings.push('the workbook has no _meta sheet: check that it comes from this review'); }
+    const workScope = work.snapshot.feature ? 'feature' : 'full';
+    if (meta?.scope && meta.scope !== workScope) {
+        warnings.push(`the workbook comes from a ${meta.scope} round, the work folder is a ${workScope} round: only rows within this work folder's scope are imported`);
+    }
     for (const s of sheets) {
         if (!s.hidden && !LANG_SHEET.test(s.name) && !INFO_SHEETS.includes(s.name)) { warnings.push(`sheet "${s.name}" is not a language tab and was ignored`); }
     }
@@ -868,6 +945,8 @@ export function commandImport(opts) {
     const useStates = currents.length ? currents.some((c) => c.parsed.usesStates) : true;
     const gBase = basename(p.gFile).replace(/\.g\.xlf$/i, '');
     const dry = Boolean(opts['dry-run']);
+    // The feature mode: only the units of the snapshot's scope change; the rest of each file stays as it is.
+    const scope = work.snapshot.feature ? new Set(work.snapshot.feature.ids) : null;
 
     const results = {};
     const remarks = [];
@@ -875,7 +954,10 @@ export function commandImport(opts) {
         const lang = normLang(sheet.name);
         requireColumns(sheet, ['Sleutel', 'Engels', 'Definitief']);
         const current = currents.find((c) => c.lang === lang) ?? null;
-        const r = { file: current?.path ?? join(p.tdir, `${gBase}.${lang}.xlf`), rows: 0, proposal: 0, changedByCustomer: 0, unchanged: 0, rejected: [], conflicts: [], removed: [], empty: [], duplicates: [] };
+        if (scope && !current?.parsed.units.length) {
+            throw new UsageError(`the feature mode adds to existing translation files, and ${lang} has none with units in ${p.tdir} — a new language is a round over the whole app`);
+        }
+        const r = { file: current?.path ?? join(p.tdir, `${gBase}.${lang}.xlf`), rows: 0, proposal: 0, changedByCustomer: 0, unchanged: 0, rejected: [], conflicts: [], removed: [], outOfScope: [], empty: [], duplicates: [] };
         const decisions = new Map();
         const curById = new Map((current?.parsed.units ?? []).map((u) => [u.id, u]));
         for (const rec of recordsOf(sheet)) {
@@ -884,6 +966,7 @@ export function commandImport(opts) {
             r.rows++;
             const gu = gById.get(key);
             if (!gu) { r.removed.push({ row: rec._row, key }); continue; }
+            if (scope && !scope.has(key)) { r.outOfScope.push({ row: rec._row, key }); continue; }
             const en = cellText(rec.Engels);
             if (en !== gu.source) { r.conflicts.push({ row: rec._row, key, exported: en, now: gu.source }); continue; }
             const def = rec.Definitief;
@@ -908,11 +991,29 @@ export function commandImport(opts) {
         for (const u of g.units) {
             if (u.translate && isBlank(u.source) && !decisions.has(u.id) && !curById.get(u.id)?.targetRaw) { decisions.set(u.id, u.source); }
         }
-        const built = buildTargetXlf(g, current?.parsed ?? null, decisions, { lang, useStates });
+        const built = scope
+            ? patchTargetXlf(g, current.parsed, decisions, { scope })
+            : buildTargetXlf(g, current?.parsed ?? null, decisions, { lang, useStates });
         Object.assign(r, { stats: built.stats, stale: built.stale, dropped: built.dropped, text: built.text });
         results[lang] = r;
     }
     if (!Object.keys(results).length) { throw new UsageError('the workbook has no language sheet (a tab named like nl-BE)'); }
+
+    // Feature mode: strings outside this round that differ from the snapshot's base -- what the branch added or changed
+    // after the snapshot, and, after a merge of master, master's new strings too. Listed as a hint for a next round,
+    // whose fresh merge-base sorts out which are the branch's.
+    let newSinceSnapshot = [];
+    if (scope) {
+        const basePath = join(work.dir, BASE_COPY);
+        if (existsSync(basePath)) {
+            const baseSource = new Map(parseXlf(readFileSync(basePath, 'utf8')).units.map((u) => [u.id, u.source]));
+            newSinceSnapshot = g.units
+                .filter((u) => u.translate && !isBlank(u.source) && !scope.has(u.id) && baseSource.get(u.id) !== u.source)
+                .map((u) => ({ id: u.id, en: u.source }));
+        } else {
+            warnings.push(`${BASE_COPY} is missing from the work folder: strings the branch added after the snapshot cannot be listed`);
+        }
+    }
 
     // Translations whose string is gone from the .g.xlf are dropped. A .g.xlf compiled from
     // another branch would drop real translations, so a write needs --allow-drop after a dry run.
@@ -927,10 +1028,12 @@ export function commandImport(opts) {
     const projectGlossary = glossary && !dry ? writeProjectGlossary(p.dir, glossary) : null;
 
     const reportPath = join(work.dir, `import-report${dry ? '-dry-run' : ''}.json`);
-    writeJson(reportPath, { imported: new Date().toISOString(), dryRun: dry, warnings, results, remarks });
+    writeJson(reportPath, { imported: new Date().toISOString(), dryRun: dry, mode: scope ? 'feature' : 'full', warnings, results, remarks, ...(scope ? { newSinceSnapshot } : {}) });
     const brief = (list) => ({ count: list.length, first: list.slice(0, 20) });
     return {
         status: dry ? 'dry-run' : 'imported',
+        mode: scope ? 'feature' : 'full',
+        ...(scope ? { newSinceSnapshot: brief(newSinceSnapshot) } : {}),
         report: reportPath,
         projectGlossary,
         warnings,
@@ -945,6 +1048,7 @@ export function commandImport(opts) {
             rejected: brief(r.rejected),
             conflicts: brief(r.conflicts),
             removed: brief(r.removed),
+            ...(scope ? { outOfScope: brief(r.outOfScope) } : {}),
             empty: r.empty.length,
             duplicates: r.duplicates.length,
             stale: { ...brief(r.stale), unmarked: r.stale.filter((s) => !s.marked).length },

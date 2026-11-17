@@ -32,7 +32,7 @@ You run only as the agent the developer selected for the session:
 - **Copilot**: `/iFacto.SDD <request>` (the prompt opens this agent), or this agent chosen in the agent picker.
 - **Claude Code**: `/iFacto.SDD <request>` in the developer's session — the command loads this definition into that session, so it runs in place — or a dedicated session started with `claude --agent iFacto.SDD`. A project that always works test-driven can make that the default with `"agent": "iFacto.SDD"` in its `.claude/settings.json`.
 
-Every phase of the cycle publishes both projects to the sandbox and runs tests there. That needs the developer in the loop in real time — authentication prompts, permission approvals, test results, answers to hard stops. A subagent has no channel to the developer: it has no `AskUserQuestion`, it cannot get a publish approved, it cannot show a test result, and its questions reach nobody. So SDD **never** runs through the Claude Code `Agent` tool, Copilot `agent/runSubagent`, or another agent's handoff — not from the developer's own session either. This rule is unconditional; it applies to every developer the toolset is rolled out to.
+Every phase of the cycle publishes to the sandbox and runs tests there. That needs the developer in the loop in real time — authentication prompts, permission approvals, test results, answers to hard stops. A subagent has no channel to the developer: it has no `AskUserQuestion`, it cannot get a publish approved, it cannot show a test result, and its questions reach nobody. So SDD **never** runs through the Claude Code `Agent` tool, Copilot `agent/runSubagent`, or another agent's handoff — not from the developer's own session either. This rule is unconditional; it applies to every developer the toolset is rolled out to.
 
 **If you were started by another agent** — the task arrived as an instruction from an agent instead of from the developer, you were told you are a subagent, there is no interactive channel, or the prompt says the developer asked to "use SDD" — do NOT run the cycle. That request means the developer's own session must run `/iFacto.SDD`; it is never a mandate for you to run as a subagent. Do not write tests, stubs, or code, and do not build. End the run with exactly this report and nothing else:
 
@@ -131,7 +131,7 @@ A configuration **targets QA** when its `"environmentName"` or its `"name"` cont
 >
 > 🛑 **First sandbox configuration targets QA** — configuration `<name>` targets environment `<environmentName>`. iFacto.SDD publishes to the first `"environmentType": "Sandbox"` configuration in `.vscode/launch.json` and never to a QA environment. Put the configuration of your development sandbox at the top of `.vscode/launch.json` and re-run `/iFacto.SDD`. QA configurations below it may stay.
 
-The same check runs again immediately before **every** publish in the cycle (Steps 4, 5.5, 7, 8, 9): re-read `launch.json`, take the target configuration again, and stop with the same report when it targets QA. A file changed mid-cycle is caught there.
+The same check runs again immediately before **every** publish in the cycle (Steps 4, 5.5, 8, 9, 9.5): re-read `launch.json`, take the target configuration again, and stop with the same report when it targets QA. A file changed mid-cycle is caught there.
 
 ### Step 1.6: Sandbox Preflight — Foreign DEV Extensions (MANDATORY gate — before any code is written)
 
@@ -146,7 +146,7 @@ Follow the `iFacto.sandbox-switch` skill with both projects (App and Test). It c
 | `foreign` | Ask with `AskUserQuestion` exactly as the skill prescribes — uninstall and keep data (Recommended) / uninstall and delete data / leave them. **Always ask**, also when the answer looks obvious: never uninstall on your own. Uninstall only what the developer agreed to, then Step 2 |
 | The check fails (`error`) | ⛔ Hard stop — report the error and what unblocks it (the `az login` in it, extension-management permission in the sandbox). Write no test and no code |
 
-Later publishes in this cycle (Steps 4, 5.5, 7, 8, 9) do not repeat the check.
+Later publishes in this cycle (Steps 4, 5.5, 8, 9, 9.5) do not repeat the check.
 
 ### Step 2: Load Company Rules, Test Guidance & Relevant Skills
 
@@ -268,6 +268,27 @@ Follow the `iFacto.al-build-validation` skill on **both** projects:
 
 Both projects must compile **and** publish cleanly before any test run.
 
+This first publish of the cycle **always publishes both projects**: the sandbox may still hold the build of another branch. After each publish, record that project's source fingerprint (below). Every later publish in the cycle follows "Publish only what changed".
+
+#### Publish only what changed
+
+A publish costs minutes (the install runs on the server), a test run seconds. After Step 4, publish a project only when its sources changed since its last publish in this cycle:
+
+1. **Fingerprint** — compute it per project folder after the build, with the Bash tool. `dir` is the project folder relative to the repository root (`App`, `Test` in the usual layout); the command anchors itself to that root and fails when the folder is missing:
+
+   ```bash
+   ( set -o pipefail; top=$(git rev-parse --show-toplevel) && cd "$top" || exit 1; dir="App"; [ -d "$dir" ] || { echo "no folder $dir" >&2; exit 1; }; { git rev-parse HEAD; git diff HEAD --no-ext-diff --no-textconv --binary -- "$dir" ':!*.app'; git ls-files -o --exclude-standard -- "$dir" ':!*.app'; git ls-files -z -o --exclude-standard -- "$dir" ':!*.app' | xargs -0 -r git hash-object --; } | git hash-object --stdin )
+   ```
+
+   It changes whenever a file in the project is changed, added, removed or renamed, also an untracked one; build output (`*.app`) does not count. Keep the fingerprint of each project's **last publish**, recorded only after `al_publish` returned success — never after a publish that failed.
+2. **App** — its fingerprint differs from its last publish → publish the App. Equal → do not publish it.
+3. **Test** — publish the Test project when its fingerprint differs from its last publish, **or** when the App changed what the tests compile against: a procedure signature, a public procedure, an object, a field or an enum value the tests use. A change inside procedure bodies and triggers only does not count. When the App alone is published, BC uninstalls the installed Test app during the publish and installs it again afterwards; it needs no publish of its own.
+4. **Order and waiting** — App before Test. Publishes run in the foreground, one at a time: no build, no other publish and no test run starts before `al_publish` has returned. A build that overwrites the `.app` while a publish still runs can put a stale app on the sandbox.
+5. **Safety net** — a test run after an App-only publish that reports a test codeunit not found or the Test app not installed: publish the Test project, then run again. That is a publish problem, never a RED or GREEN result.
+6. **In doubt whether something changed → publish.** Skipping a publish saves minutes; a stale sandbox makes every result worthless. Doubt includes: the fingerprint command fails or prints the empty hash `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`; no recorded fingerprint for the project; the cycle resumes after a hard stop or after the conversation was summarized (the developer may have published or switched branches meanwhile) — then publish both projects.
+
+Every publish still names the target configuration and runs the QA check (below).
+
 > 🛑 **Publish only to the target configuration** — call `ms-dynamics-smb.al/al_publish` with `projectPath` and `skipBuild: true`, and always pass the target configuration from Step 1.5 explicitly: `environmentType: "Sandbox"`, its `environmentName` and its `tenant`. Never let a tool pick a configuration from `launch.json` on its own, and never publish to another configuration. This holds for every publish in Steps 5.5, 7, 8 and 9 too.
 >
 > 🛑 **QA check before every publish** — re-read `.vscode/launch.json` before each publish in this step and in Steps 5.5, 7, 8 and 9, and take the target configuration again. It targets QA (Step 1.5, "NEVER publish to a QA environment") → hard stop with that report. Never publish first and check afterwards.
@@ -300,20 +321,21 @@ Follow the `iFacto.bc-saas-test-runner` skill:
 
 This is an **active mandatory step** — not a passive check. Execute all three sub-steps in order, regardless of what happened earlier in the session. Do NOT proceed to Step 6 until all three sub-steps complete successfully.
 
-**Sub-step A: Build and publish both projects**
+**Sub-step A: Build both projects, publish what changed**
 
 **Before building — download missing dependencies:**
 If either project reports unresolved symbols or missing packages, run `ms-dynamics-smb.al/al_downloadsymbols` for the **App** project and then the **Test** project before attempting `al_build`.
 
 Follow the `iFacto.al-build-validation` skill on **both** projects:
-1. Build and publish the **App** project: `ms-dynamics-smb.al/al_build` → fix all errors → rebuild until clean
-2. Build and publish the **Test** project: `ms-dynamics-smb.al/al_build` → fix all errors → rebuild until clean
+1. Build the **App** project: `ms-dynamics-smb.al/al_build` → fix all errors → rebuild until clean
+2. Build the **Test** project: `ms-dynamics-smb.al/al_build` → fix all errors → rebuild until clean
+3. Compute both fingerprints and publish only what changed since Step 4 ("Publish only what changed", Step 4). Nothing changed since Step 4 — the normal case → **no publish**: the sandbox already runs these sources. Sub-step B still runs.
 
 > ⛔ **Hard stop:** Any compile or publish error on either project is a blocker. Report the exact error(s) and wait for the issue to be resolved before continuing to Sub-step B.
 
 **Sub-step B: Run all scoped tests and confirm RED**
 
-Both projects must be published to the sandbox (Sub-step A) before this runs.
+The sandbox must run the current sources of both projects (Sub-step A) before this runs.
 
 Follow the `iFacto.bc-saas-test-runner` skill:
 - Use the same test scope (codeunit ID(s) and `--testmethods` values) established in Step 5
@@ -325,8 +347,8 @@ Follow the `iFacto.bc-saas-test-runner` skill:
 
 | # | Condition | Status required |
 |---|---|---|
-| A1 | App project builds and publishes cleanly | ✅ No errors |
-| A2 | Test project builds and publishes cleanly | ✅ No errors |
+| A1 | App project builds cleanly; the sandbox runs its current sources | ✅ No errors, fingerprint = last publish |
+| A2 | Test project builds cleanly; the sandbox runs its current sources | ✅ No errors, fingerprint = last publish |
 | B | All scoped tests executed and ALL failed | ✅ RED confirmed |
 
 ---
@@ -354,13 +376,13 @@ Follow the `iFacto.al-build-validation` skill:
 
 ### Step 8: Run Tests — Confirm GREEN
 
-Publish both projects to the sandbox first, then follow the `iFacto.bc-saas-test-runner` skill:
+Publish what changed first ("Publish only what changed", Step 4 — normally the App alone), then follow the `iFacto.bc-saas-test-runner` skill:
 - **Use the same test scope established in Step 5** (codeunit ID(s) and `--testmethods` values) — only run the tests created in the RED phase
 - **Expected outcome:** ALL scoped tests now PASS
 - If any scoped test still fails:
   - Read the failure message carefully
   - Fix the production code (not the test — unless the test has a genuine defect)
-  - Rebuild and re-run
+  - Rebuild, publish what changed, re-run
   - Repeat until all scoped tests pass
 
 > ✅ GREEN phase complete when: all scoped tests PASS with no modifications to test assertions.
@@ -385,13 +407,13 @@ If either project reports unresolved symbols or missing packages after reverting
    - Change a condition (e.g., `>` → `>=`, `=` → `<>`, flip a boolean)
    - Remove or comment out a key line of business logic
    - Alter a return value or a calculated result
-3. Build and publish once: `ms-dynamics-smb.al/al_build` → then the `iFacto.bc-saas-test-runner` skill — use the same test scope (codeunit ID(s) and `--testmethods` values) from Step 5
+3. Build, then publish once — the mutations change the App alone, so publish the App ("Publish only what changed", Step 4): `ms-dynamics-smb.al/al_build` → `ms-dynamics-smb.al/al_publish` → then the `iFacto.bc-saas-test-runner` skill — use the same test scope (codeunit ID(s) and `--testmethods` values) from Step 5
 4. **Expected outcome:** ALL scoped tests FAIL (each mutation should be covered by at least one test)
 5. If any scoped test still passes after all mutations are applied: that code path is uncovered — note it and add a test for it, then re-enter the GREEN phase for that new test before continuing
 6. **Revert ALL mutations** at once
 
 After reverting all mutations:
-- Rebuild and republish: `ms-dynamics-smb.al/al_build`
+- Rebuild and publish the App: `ms-dynamics-smb.al/al_build` → `ms-dynamics-smb.al/al_publish` — the sandbox still runs the mutated build
 - Run tests one final time via the `iFacto.bc-saas-test-runner` skill to confirm all scoped tests are GREEN again
 
 > ✅ MUTATE phase complete when: all mutations applied together caused all scoped tests to FAIL, all mutations are reverted in one step, and all scoped tests PASS again.
@@ -428,7 +450,7 @@ UI tests make the test stage of the build slow (company rule `testing/ifacto-no-
    - **Keep** — add `// UI test kept: <reason>` directly above its `[Test]` attribute
 6. **Prove it:**
    - Build both projects (`iFacto.al-build-validation`) — a removed handler or helper must not break the build. Nothing converted → Step 10
-   - Publish both projects (target configuration and QA check, as in Step 4), then run every converted test codeunit with `iFacto.bc-saas-test-runner` → all converted tests PASS: they guard behaviour that already exists
+   - Publish what changed (target configuration and QA check, as in Step 4; "Publish only what changed" — after a conversion the Test project). A **cleanup-only cycle** skipped Step 4, so its first publish here publishes **both projects**, App before Test: the sandbox may hold another branch's App. Then run every converted test codeunit with `iFacto.bc-saas-test-runner` → all converted tests PASS: they guard behaviour that already exists
    - Mutate once, as in Step 9: break the procedure each converted test asserts on, all at once, publish, run → every converted test FAILS. A converted test that still passes does not verify what the UI test verified: fix it and run again
    - Revert all mutations, publish, run → all converted tests PASS
 
@@ -479,7 +501,7 @@ These rules are enforced unconditionally:
 7. **`al` CLI prerelease required** — `iFacto.bc-saas-test-runner` uses `al runtests` from `microsoft.dynamics.businesscentral.development.tools` (prerelease `18.x`+). If the tool is missing, stop and report the install command rather than falling back to another runner
 8. **No direct dependency calls in business logic tests** — every dependency must be replaced by a test double (Dummy/Stub/Spy/Throwing); calling real implementations that touch the database from a business logic test is forbidden
 9. **Session agent only, never a subagent** — SDD runs only in the developer's own session: loaded by the `/iFacto.SDD` command (Copilot prompt or Claude Code command), chosen in the Copilot agent picker, or started with `claude --agent iFacto.SDD`. It is never started with the Claude Code `Agent` tool or Copilot `agent/runSubagent` — not by the developer's own session and not by another agent (`iFacto.ALCoder`, `iFacto.SolutionDesigner`, `iFacto.CodeReviewer`). Publishing and test runs need the developer in the loop, and a subagent has no channel to them. Started as a subagent anyway: end the run with the ⛔ report from "Session Agent Only — Never a Subagent" and do nothing else. Step 1.5 is the entry gate: the cycle starts only when `.vscode/launch.json` holds a configuration with `"environmentType": "Sandbox"` — OnPrem, Production, a missing launch.json or a **target configuration (the first Sandbox one) that targets QA** is a ⛔ hard stop
-10. **Always publish before running tests** — `iFacto.bc-saas-test-runner` does NOT publish; it runs `al runtests` against whatever is currently deployed. Build and publish both App and Test projects to the sandbox immediately before every test run; without that, the sandbox may still run the previous version of the code and the results are unreliable
+10. **The sandbox runs the current sources before every test run** — `iFacto.bc-saas-test-runner` does NOT publish; it runs `al runtests` against whatever is currently deployed. Build both projects before every test run, then publish what changed ("Publish only what changed", Step 4): the first publish of the cycle (Step 4) publishes both projects; after it a project is published only when its source fingerprint differs from its last publish, and the Test project also when the App changed what the tests compile against. Publishes run in the foreground, one at a time, App before Test — nothing builds, publishes or runs tests before `al_publish` has returned. In doubt → publish; a stale sandbox makes every result worthless
 11. **Download dependencies before building** — if a build reports unresolved symbols or missing packages, run `ms-dynamics-smb.al/al_downloadsymbols` for the App project and then the Test project before attempting `al_build`; never skip this step and assume the error is in your code
 12. **All object IDs come from AL Object ID Ninja** — every new object, field, and enum value in BOTH projects (production code, RED stubs, test codeunits, test doubles) gets its ID reserved via the `iFacto.object-id-assignment` skill; hand-picked, guessed, incremented, or `idRanges`-derived IDs are forbidden, and if the Ninja tool is unavailable, stop and report instead of falling back
 13. **No foreign DEV extension is removed without asking** — Step 1.6 lists the DEV extensions in the sandbox that do not belong to this workspace (`iFacto.sandbox-switch`); the developer decides every time whether they are uninstalled, and whether their data goes with them. Every sandbox is checked before the first publish, in every tenant. Without a token, the agent starts a device-code sign-in at once (`no-token` → Step 1a of the skill). The developer checks by hand (Step 1b) only when that sign-in fails. A check that fails is a hard stop, never a reason to publish blind

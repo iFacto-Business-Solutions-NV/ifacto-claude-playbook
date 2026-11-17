@@ -57,7 +57,7 @@ Every phase of the cycle publishes both projects to the sandbox and runs tests t
 
 ## Workflow
 
-⛔ **Required toolset** (always-on Required Toolset Gate — run it at Step 1A, right after the start time is recorded): the AL tooling (`al_build`, `al_publish`, `al_downloadsymbols`, `al_symbolsearch`, `al_getdiagnostics`), `mcp-server-atlassian-jira` (when a JIRA issue is referenced), `microsoft-learn-mcp`, `al-object-id-ninja`, `bc-code-atlas`, the BCQuality knowledge base on disk (`iFacto.company-guidelines`), and the sandbox from `.vscode/launch.json` (its own hard stop). The Azure CLI (`az`) makes Step 1.6 automatic. When az has no login in that sandbox's tenant, Step 1.6 starts a device-code sign-in at once (`iFacto.sandbox-switch`, Step 1a). Without az, or when that sign-in fails, Step 1.6 is done by hand (Step 1b). It is never skipped. Any of the others missing or unreachable → stop, report what unblocks it, write no test and no code.
+⛔ **Required toolset** (always-on Required Toolset Gate — run it at Step 1A, right after the start time is recorded): the AL tooling (`al_build`, `al_publish`, `al_downloadsymbols`, `al_symbolsearch`, `al_getdiagnostics`), `atlassian` (Jira, when a JIRA issue is referenced), `microsoft-learn`, `al-object-id-ninja`, `bc-code-atlas`, the BCQuality knowledge base on disk (`iFacto.company-guidelines`), and the sandbox from `.vscode/launch.json` (its own hard stop). The Azure CLI (`az`) makes Step 1.6 automatic. When az has no login in that sandbox's tenant, Step 1.6 starts a device-code sign-in at once (`iFacto.sandbox-switch`, Step 1a). Without az, or when that sign-in fails, Step 1.6 is done by hand (Step 1b). It is never skipped. Any of the others missing or unreachable → stop, report what unblocks it, write no test and no code.
 
 ### Step -1: Record Start Time (MANDATORY FIRST STEP)
 
@@ -94,9 +94,9 @@ Before writing any code, check if a design document already exists.
 
 **If a JIRA issue key is provided, check its status BEFORE doing any work.**
 
-1. Retrieve issue: `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/issue/{KEY}`
-2. Read `fields.status.statusCategory.key`:
-   - **new** (Open, To Do, Backlog): ask with `AskUserQuestion` — transition it to Confirmed and start (Recommended) / start without touching Jira / stop and let someone groom it first. On the first answer, transition via `jira_post` → `/rest/api/3/issue/{KEY}/transitions`
+1. Retrieve issue: `getJiraIssue` (`atlassian` server, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `view: evidence`)
+2. Read the issue's status category (`new` / `indeterminate` / `done`):
+   - **new** (Open, To Do, Backlog): ask with `AskUserQuestion` — transition it to Confirmed and start (Recommended) / start without touching Jira / stop and let someone groom it first. On the first answer, transition via `listJiraIssueTransitions` (through `executeRead`, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`) and then `transitionJiraIssue` with the id of the transition whose target status is Confirmed
    - **indeterminate** (Confirmed, In Progress): proceed without asking
    - **done** (Resolved, Closed): warn, then ask with `AskUserQuestion` — reopen it / write tests against it as-is / stop (Recommended). Never reopen on your own
 3. **Do NOT generate any code until this gate is passed.**
@@ -153,8 +153,8 @@ Later publishes in this cycle (Steps 4, 5.5, 7, 8, 9) do not repeat the check.
 **MANDATORY — always in this order:**
 
 1. **iFacto company rules** — follow the `iFacto.company-guidelines` skill FIRST — load every applicable iFacto rule from the BCQuality custom layer (including the `.good.al`/`.bad.al` samples) and apply them to BOTH production code and test code as MANDATORY constraints
-2. **Test design guidance** — for test codeunit structure, handler methods, test isolation, `LibraryAssert`, `LibraryVariableStorage`, and fixture patterns, consult the BCQuality `microsoft/knowledge/` testing articles and `microsoft-learn-mcp` for official BC testing documentation   
-3. **Production AL patterns** — consult the BCQuality `microsoft/knowledge/` articles for the relevant domain and `microsoft-learn-mcp` for the production implementation
+2. **Test design guidance** — for test codeunit structure, handler methods, test isolation, `LibraryAssert`, `LibraryVariableStorage`, and fixture patterns, consult the BCQuality `microsoft/knowledge/` testing articles and `microsoft-learn` for official BC testing documentation   
+3. **Production AL patterns** — consult the BCQuality `microsoft/knowledge/` articles for the relevant domain and `microsoft-learn` for the production implementation
 4. **Existing skills** — invoke any skills that are relevant to this implementation before writing code:
    - `iFacto.al-security-review` (design mode) — if the feature touches security-sensitive areas (`SecretText`, `HttpClient`, `IsolatedStorage`, permissions, sensitive fields, telemetry, startup hooks)
    - `iFacto.impact-analysis` — if the feature modifies existing objects that other code depends on
@@ -336,7 +336,7 @@ Follow the `iFacto.bc-saas-test-runner` skill:
 Write the minimum production code needed to make the failing tests pass.
 
 - Follow the loaded iFacto company rules — they are MANDATORY, not advisory
-- Follow BC/AL best practices (BCQuality `microsoft/knowledge/` articles + `microsoft-learn-mcp`)
+- Follow BC/AL best practices (BCQuality `microsoft/knowledge/` articles + `microsoft-learn`)
 - Reuse the IDs already assigned in Step 2.5 — stubs keep their ID as they gain logic. Any object, field, or enum value that turns out to be needed only now gets its ID reserved via the `iFacto.object-id-assignment` skill before it is written
 - File naming: `<ObjectType> <ID> <Name>.al` in the App project
 - One object per file (iFacto standard)

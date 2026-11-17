@@ -1,5 +1,5 @@
 {
-  "description": "iFacto review gate: iFacto.CodeReviewer may not finish before the rulebook pass, the BCQuality dispatch and the security review have all run (hooks/review-gate.mjs)",
+  "description": "iFacto plugin hooks: the review gate (iFacto.CodeReviewer may not finish before the rulebook pass, the BCQuality dispatch and the security review have all run; hooks/review-gate.mjs) and the always-on instructions for machines without the managed CLAUDE.md block (hooks/always-on.mjs)",
   "hooks": {
     "SubagentStop": [
       {
@@ -9,6 +9,69 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/review-gate.mjs\"",
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
+              "session",
+              "1"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
+              "session",
+              "2"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
+              "session",
+              "3"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
+              "session",
+              "4"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "iFacto\\.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
+              "subagent"
+            ],
+            "timeout": 10
           }
         ]
       }

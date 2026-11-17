@@ -1,8 +1,15 @@
 {
   "mcpServers": {
-    "bc-code-atlas": {
+    "atlassian": {
       "type": "http",
-      "url": "https://bc-code-atlas.stefanmaron.dev/mcp"
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    "al-object-id-ninja": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@vjeko.com/al-object-id-ninja-mcp@1"
+      ]
     }
   }
 }

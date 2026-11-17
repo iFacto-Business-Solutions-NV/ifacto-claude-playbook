@@ -5,6 +5,9 @@
     "name": "iFacto Business Solutions",
     "url": "https://www.ifacto.be"
   },
+  "allowCrossMarketplaceDependenciesOn": [
+    "bc-observatory"
+  ],
   "plugins": [
     {
       "name": "ifacto",

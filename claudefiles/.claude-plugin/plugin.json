@@ -5,5 +5,11 @@
   "author": {
     "name": "iFacto Business Solutions"
   },
-  "repository": "https://dev.azure.com/iFactoAcademy/iFacto%20Playbook/_git/BCCompanyGuidelines"
+  "repository": "https://dev.azure.com/iFactoAcademy/iFacto%20Playbook/_git/BCCompanyGuidelines",
+  "dependencies": [
+    {
+      "name": "bc-observatory",
+      "marketplace": "bc-observatory"
+    }
+  ]
 }

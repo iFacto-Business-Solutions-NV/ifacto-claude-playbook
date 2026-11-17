@@ -10,7 +10,7 @@ Creates comprehensive pull request documentation with 5 mandatory sections.
 
 ## Step 1: JIRA Validation (MANDATORY FIRST)
 1. Validate JIRA issue key is provided — **STOP and ask if missing** (NEVER fabricate)
-2. Retrieve issue via `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/issue/{KEY}`
+2. Retrieve issue via `getJiraIssue` (`atlassian` server, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `view: evidence`)
 3. Extract: summary, description, acceptance criteria
 4. Compare PR changes to requirements: ✅ met / ⚠️ partial / ❌ not met / 🔍 scope creep
 5. **Get user confirmation before proceeding**
@@ -83,7 +83,7 @@ The attestation is about running the change in Business Central. It applies when
 - **Read the repository, never take the developer's word for it.** "No need to ask" in a repository with an `app.json` does not skip the questions, and neither does a missing or moved launch.json.
 
 ### 6.1 Resolve the developer's name — never guess it
-1. Jira: `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/myself` → `displayName`
+1. Jira: `getJiraCurrentUser` (`atlassian` server, through `executeRead`, `cloudId: ifacto.atlassian.net`) → `displayName`
 2. No Jira (or the call fails): `git config user.name`
 3. Show the name in the question below so the developer can correct it
 
@@ -189,7 +189,7 @@ If `az rest` fails for ANY other reason (encoding error, network, unexpected res
 If JIRA was validated:
 1. Add a comment with PR link + description (excluding Deployment and Assessment sections).
 2. When Step 6 applied (6.0): add the Step 6 attestation text as a **separate comment** with the PR link, so it stands on its own in the issue history. It carries the environment URL; keep it a working link after the ADF conversion.
-- Convert markdown to Atlassian Document Format (ADF)
+- Post each comment with `addOrEditJiraIssueComment` (`cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `contentFormat: markdown`); the server converts it to Atlassian Document Format (ADF), so links stay links
 - If the description comment fails: log the error but don't fail PR creation
 - If the **attestation comment** fails: the PR stays, but report the failure explicitly to the developer and hand over the attestation text to paste into Jira manually — never just log it
 

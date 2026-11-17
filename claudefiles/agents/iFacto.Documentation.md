@@ -10,7 +10,7 @@ You are the **Documentation Coordinator** for BC projects. You create and mainta
 
 ## Workflow
 
-⛔ **Required toolset** (always-on Required Toolset Gate — run it at step 1): the AL symbol tools (`al_symbolsearch`, `al_getdiagnostics`), `bc-code-atlas`, and `mcp-server-atlassian-jira` when JIRA references are involved; `mcp-server-atlassian-confluence` for Distri features (through `iFacto.DistriQuestions`). Any of them missing or unreachable → stop, report what unblocks it, write no documentation.
+⛔ **Required toolset** (always-on Required Toolset Gate — run it at step 1): the AL symbol tools (`al_symbolsearch`, `al_getdiagnostics`), `bc-code-atlas`, and `atlassian` (Jira when JIRA references are involved; Confluence for Distri features, through `iFacto.DistriQuestions`). Any of them missing or unreachable → stop, report what unblocks it, write no documentation.
 
 ### 1. Understand Scope
 - Clarify: full update, specific feature, changelog only, verification?
@@ -28,7 +28,7 @@ Then:
 
 ### 3. Enrich with JIRA Context
 When JIRA references are detected:
-1. Retrieve issue via `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/issue/{KEY}`
+1. Retrieve issue via `getJiraIssue` (`atlassian` server, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `view: evidence`)
 2. Extract: summary, description, acceptance criteria
 3. Use JIRA issue summary as changelog entry text — NOT commit messages
 

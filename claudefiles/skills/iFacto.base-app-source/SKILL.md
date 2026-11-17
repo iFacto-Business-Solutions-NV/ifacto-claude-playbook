@@ -34,16 +34,15 @@ dependencies. Those stay with `ms-dynamics-smb.al/al_symbolsearch`,
 `al-mcp-server/al_find_references` and the `iFacto.codebase-reconnaissance` /
 `iFacto.impact-analysis` skills. DistriApps behaviour comes from `iFacto.DistriQuestions`.
 
-## Reaching the atlas - four access paths
+## Reaching the atlas - three access paths
 
 All paths hit the same hosted server (`https://bc-code-atlas.stefanmaron.dev/mcp`, public,
 no authentication). Hosts prefix the tool names differently; the bare `bcatlas_` name is unique.
 
 | Host | How it is connected | Tool name you will see |
 |------|---------------------|------------------------|
-| Claude Code via the iFacto plugin (default) | the `ifacto` plugin ships `bc-code-atlas` in its `.mcp.json`; every developer with the plugin has it | `mcp__plugin_ifacto_bc-code-atlas__bcatlas_search` |
+| Claude Code via the `bc-observatory` plugin (default) | the `ifacto` plugin depends on `bc-observatory`, which bundles the atlas next to `bc-observatory` and `microsoft-learn`; every developer with the `ifacto` plugin has it | `mcp__plugin_bc-observatory_bc-code-atlas__bcatlas_search` |
 | Claude Code, direct server (what the iFacto Playbook extension used to install) | `claude mcp add --transport http bc-code-atlas <url>` at user scope | `mcp__bc-code-atlas__bcatlas_search` |
-| Claude Code via the community `bc-observatory` plugin | the plugin bundles the atlas next to `bc-observatory` | `mcp__plugin_bc-observatory_bc-code-atlas__bcatlas_search` |
 | GitHub Copilot in VS Code | `servers.bc-code-atlas` (type `http`) in the user `mcp.json` | `bcatlas_search` with the host's `mcp_` prefix |
 
 **Use whichever the current session actually exposes**: list your tools, do not assume a
@@ -51,10 +50,8 @@ prefix from this table. You normally see **one** set of `bcatlas_` tools even wh
 is configured in several places: Claude Code connects once per endpoint and matches plugin
 servers by URL, so a server at the same URL in a higher-precedence scope (local, project,
 user) wins over the plugin's copy. A developer who also has the direct server from the
-extension therefore gets the `mcp__bc-code-atlas__` names, not the plugin ones. The docs do
-not say which plugin wins when two plugins (for example `ifacto` and `bc-observatory`) declare
-the same URL; whichever one the session lists is the one to use. Only if you really see two
-sets of `bcatlas_` tools: use either, and mention it to the developer.
+extension therefore gets the `mcp__bc-code-atlas__` names, not the plugin ones. Only if you really see two sets of `bcatlas_` tools: use either, and mention it to the
+developer.
 
 ### Required toolset gate — `bc-code-atlas`
 
@@ -67,9 +64,11 @@ ask whether to continue with a degraded toolset. As a subagent: end the run with
 
 What unblocks it:
 
-- **The ifacto plugin brings it** (Claude Code, default): check that the plugin is installed
-  and enabled (`/plugin`, plugin `ifacto` from marketplace `ifacto-playbook`) and that the
-  server `plugin:ifacto:bc-code-atlas` is not toggled off in `/mcp`. Nothing else to install.
+- **The bc-observatory plugin brings it** (Claude Code, default; a dependency of the `ifacto`
+  plugin): check that both plugins are installed and enabled (`/plugin`: `ifacto` from
+  marketplace `ifacto-playbook`, `bc-observatory` from marketplace `bc-observatory`) and that the
+  server `plugin:bc-observatory:bc-code-atlas` is not toggled off in `/mcp`. Nothing else to
+  install.
 - **iFacto Playbook extension** (fallback): `iFacto: Install MCP Servers (Claude Code CLI only)`
   or `iFacto: Install MCP Servers (GitHub Copilot only)`; `bc-code-atlas` is enabled in every
   profile. This is also the route for GitHub Copilot.
@@ -102,7 +101,7 @@ What unblocks it:
 4. **Read the body — only as far as the question needs.** `bcatlas_get_procedure_body` for one
    procedure or trigger; `bcatlas_get_object_source` only when the whole object matters.
 5. **Name unknown → search first.** `bcatlas_search(query, limit≤5)` by meaning, then continue
-   at step 1 with the strongest candidate. Prefer `microsoft-learn-mcp` (or the observatory,
+   at step 1 with the strongest candidate. Prefer `microsoft-learn` (or the observatory,
    if present) for *topics and docs*; the atlas search is for *code*.
 
 ### Versions and countries

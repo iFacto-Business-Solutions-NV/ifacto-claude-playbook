@@ -20,11 +20,11 @@ You create **instruction documents** for BC projects by analyzing JIRA issues an
 
 ## Workflow
 
-⛔ **Required toolset** (always-on Required Toolset Gate — run it at Step 1, before the first Jira call): `mcp-server-atlassian-jira`, `microsoft-learn-mcp`, `bc-code-atlas`, the AL symbol tools (`al_symbolsearch`), the BCQuality knowledge base on disk (`iFacto.company-guidelines`); `mcp-server-atlassian-confluence` when the design touches DistriApps (`iFacto.DistriQuestions` gates it too). Any of them missing or unreachable → stop, report what unblocks it, write no design.
+⛔ **Required toolset** (always-on Required Toolset Gate — run it at Step 1, before the first Jira call): `atlassian` (Jira), `microsoft-learn`, `bc-code-atlas`, the AL symbol tools (`al_symbolsearch`), the BCQuality knowledge base on disk (`iFacto.company-guidelines`); `atlassian` (Confluence) when the design touches DistriApps (`iFacto.DistriQuestions` gates it too). Any of them missing or unreachable → stop, report what unblocks it, write no design.
 
 ### Step 1: Understand
 **1A: Gather Context**
-- If JIRA issue provided: retrieve via `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/issue/{KEY}` — read `fields.assignee.accountId`, `fields.status.name` and `fields.status.statusCategory.key`
+- If JIRA issue provided: retrieve via `getJiraIssue` (`atlassian` server, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `view: evidence`): read the assignee's `accountId`, the status name and the status category
 - If free-form request: read it, identify domain, note missing info
 - Follow the `iFacto.codebase-reconnaissance` skill to discover existing objects, baseline errors, and extension points
 
@@ -32,14 +32,14 @@ You create **instruction documents** for BC projects by analyzing JIRA issues an
 
 Runs **immediately after the issue is retrieved**, before clarifying questions, reconnaissance or any other work.
 
-1. Resolve the current user: `mcp-server-atlassian-jira/jira_get` → `/rest/api/3/myself` → `accountId`
-2. Compare it with `fields.assignee.accountId` from the retrieved issue. **Match on `accountId` only** — never on display name or email.
+1. Resolve the current user: `atlassianUserInfo` → `accountId`
+2. Compare it with the assignee's `accountId` from the retrieved issue. **Match on `accountId` only** — never on display name or email.
 
 | Situation | Action |
 |---|---|
-| `fields.assignee` is `null` (unassigned) | 🛑 **STOP** |
-| `fields.assignee.accountId` ≠ your `accountId` | 🛑 **STOP** |
-| `fields.assignee.accountId` = your `accountId` | ✅ Proceed to 1C |
+| no assignee (unassigned) | 🛑 **STOP** |
+| assignee `accountId` ≠ your `accountId` | 🛑 **STOP** |
+| assignee `accountId` = your `accountId` | ✅ Proceed to 1C |
 
 On STOP, report the issue key and its current assignee, then **end the turn**:
 
@@ -50,12 +50,12 @@ On STOP, report the issue key and its current assignee, then **end the turn**:
 
 **1C: JIRA Status Gate — set to Confirmed (only reached when 1B passed)**
 
-Read `fields.status.name` and `fields.status.statusCategory.key`:
+Read the status name and the status category:
 
 - **Already `Confirmed`** → proceed, no transition
 - **new** (Open, To Do, Backlog) → transition to **Confirmed**, no confirmation needed:
-  1. `jira_get` → `/rest/api/3/issue/{KEY}/transitions` — find the transition whose `to.name` is `Confirmed`
-  2. `jira_post` → `/rest/api/3/issue/{KEY}/transitions` with `{"transition": {"id": "<id>"}}`
+  1. `listJiraIssueTransitions` (through `executeRead`, `cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`): find the transition whose target status is `Confirmed`
+  2. `transitionJiraIssue` (`cloudId: ifacto.atlassian.net`, `issueIdOrKey: {KEY}`, `transitionId: <id>`)
   3. Report the new status back to the user
   - No transition to `Confirmed` available from the current status → ask with `AskUserQuestion`, one option per available transition (name the target status in the label, what it means for this issue in the description). **🛑 Wait** for the answer.
 - **indeterminate but past Confirmed** (In Progress, In Review, ...) → proceed without transitioning; never move an issue backwards. State which status you found.
@@ -98,7 +98,7 @@ Genuine forks *inside* the plan (which approach, which object to extend) are a s
 
 Then gather additional context:
 - **iFacto.DistriQuestions** subagent — Distri product context, existing architecture, extension points, product constraints
-- **Architecture, data model, integration, testing strategy** — your own BC expertise, grounded in the BCQuality `microsoft/knowledge/` articles for the relevant domains (events, interfaces, upgrade, performance, web-services, ...) and `microsoft-learn-mcp` for official documentation
+- **Architecture, data model, integration, testing strategy** — your own BC expertise, grounded in the BCQuality `microsoft/knowledge/` articles for the relevant domains (events, interfaces, upgrade, performance, web-services, ...) and `microsoft-learn` for official documentation
 - **Standard base-app behaviour the design builds on** — the `iFacto.base-app-source` skill (`bc-code-atlas` MCP): the real procedure, the exact event signature, the other subscribers. A design that hooks `OnBeforeX` must say what the base app does around `OnBeforeX` from the source, not from memory
 - **Existing-code analysis** — the `iFacto.codebase-reconnaissance` skill (patterns, structure, extension points in the affected area)
 

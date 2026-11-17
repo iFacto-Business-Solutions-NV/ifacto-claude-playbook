@@ -37,7 +37,8 @@ no matter which assistant reserved them.
 | Host | Path | Reserve | Release |
 |------|------|---------|---------|
 | GitHub Copilot in VS Code | VS Code language model tools — built into the Ninja extension, no MCP setup | `vjeko.vjeko-al-objid/ninjaNextId` | `vjeko.vjeko-al-objid/ninjaUnassignId` |
-| Claude Code, Cursor, any MCP client | the Ninja MCP server (`@vjeko.com/al-object-id-ninja-mcp`) | `ninja_assignObjectId` — as `mcp__al-object-id-ninja__ninja_assignObjectId` in Claude Code | `ninja_unassignObjectId` |
+| Claude Code via the `ifacto` plugin (default) | the plugin ships the Ninja MCP server (`@vjeko.com/al-object-id-ninja-mcp@1`, `npx`) in its `.mcp.json` | `mcp__plugin_ifacto_al-object-id-ninja__ninja_assignObjectId` | `ninja_unassignObjectId` |
+| Claude Code direct server, Cursor, any MCP client | the Ninja MCP server (`@vjeko.com/al-object-id-ninja-mcp`) | `ninja_assignObjectId` — as `mcp__al-object-id-ninja__ninja_assignObjectId` in Claude Code | `ninja_unassignObjectId` |
 | Claude Code via the iFacto AL bridge | the bridge proxying the VS Code tools | `mcp__al-mcp-bridge__vjeko-al-objid_getNextObjectId` | `mcp__al-mcp-bridge__vjeko-al-objid_unassignObjectId` |
 
 **Use whichever the current session actually exposes** — list your tools, do not assume a
@@ -46,10 +47,12 @@ name from this table. In Copilot Chat the VS Code tools also answer plain reques
 
 ### If no Ninja tool is present (Claude Code / Cursor)
 
-Install the MCP server, then retry — never work around its absence. Until a Ninja tool is
-present and answers, the workflow is ⛔ stopped (always-on Required Toolset Gate): no object,
-field or enum value is written with a guessed ID; report what unblocks it (below, or
-`iFacto: Install MCP Servers (…)` from the iFacto Playbook extension).
+Never work around its absence. Until a Ninja tool is present and answers, the workflow is ⛔
+stopped (always-on Required Toolset Gate): no object, field or enum value is written with a
+guessed ID; report what unblocks it. In Claude Code the `ifacto` plugin brings the server:
+check `/plugin` (`ifacto` enabled) and `/mcp` (`plugin:ifacto:al-object-id-ninja` not toggled
+off; failed means Node.js is missing, since it runs with `npx`). Only without the plugin
+install it by hand:
 
 Claude Code:
 

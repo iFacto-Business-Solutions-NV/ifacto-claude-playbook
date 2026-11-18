@@ -129,20 +129,41 @@ function loadWork(opts, { review = false } = {}) {
 const loadReference = (dir) => (existsSync(join(dir, 'reference.json')) ? readJson(join(dir, 'reference.json')) : {});
 const loadGlossary = (dir) => (existsSync(join(dir, 'glossary.json')) ? readJson(join(dir, 'glossary.json')) : null);
 
-/**
- * Keeps the glossary in the customer repo, so the next round starts from the same terms. Unchanged terms are not
- * rewritten: a new date alone would make every feature PR conflict on this file. Returns the path, or null when
- * nothing changed.
- */
-function writeProjectGlossary(projectDir, glossary) {
-    const path = join(resolve(projectDir), 'translation-glossary.json');
-    const terms = glossary.terms.map(({ origin, ...t }) => t);
-    if (existsSync(path)) {
-        try {
-            if (JSON.stringify(readJson(path).terms ?? null) === JSON.stringify(terms)) { return null; }
-        } catch { /* unreadable: rewrite it */ }
+const glossaryFileOf = (projectDir) => join(resolve(projectDir), 'translation-glossary.json');
+
+function readProjectGlossary(projectDir) {
+    const path = glossaryFileOf(projectDir);
+    if (!existsSync(path)) { return null; }
+    try { return readJson(path); } catch { return null; }
+}
+
+/** The project glossary for a write: an unreadable file (a merge conflict, typically) stops the import, never gets overwritten. */
+function projectGlossaryForWrite(projectDir) {
+    const path = glossaryFileOf(projectDir);
+    if (!existsSync(path)) { return null; }
+    try { return readJson(path); } catch {
+        throw new UsageError(`${path} is not valid JSON (a merge conflict?). Resolve it first, then import again: the import would overwrite its terms and the record of the last full round`);
     }
-    writeJson(path, { schema: SCHEMA, updated: today(), terms });
+}
+
+/**
+ * Keeps the glossary in the customer repo, so the next round starts from the same terms, and records the last full
+ * round (`lastFullRound`: date, commit, languages), so the next full round offers only what is still open. Unchanged
+ * terms are not rewritten: a new date alone would make every feature PR conflict on this file. Returns the path, or
+ * null when nothing changed.
+ */
+function writeProjectGlossary(projectDir, glossary, { fullRound = null } = {}) {
+    if (!glossary && !fullRound) { return null; }
+    const path = glossaryFileOf(projectDir);
+    const existing = projectGlossaryForWrite(projectDir);
+    const terms = glossary ? glossary.terms.map(({ origin, ...t }) => t) : existing?.terms ?? [];
+    const last = fullRound
+        ? { ...fullRound, langs: [...new Set([...(existing?.lastFullRound?.langs ?? []), ...fullRound.langs])].sort() }
+        : existing?.lastFullRound ?? null;
+    if (existing
+        && JSON.stringify(existing.terms ?? null) === JSON.stringify(terms)
+        && JSON.stringify(existing.lastFullRound ?? null) === JSON.stringify(last)) { return null; }
+    writeJson(path, { schema: SCHEMA, updated: today(), ...(last ? { lastFullRound: last } : {}), terms });
     return path;
 }
 
@@ -329,6 +350,9 @@ export function commandSnapshot(opts) {
     };
     // The base goes into the work folder: the import needs it after the worktree is gone.
     if (feature) { snapshot.feature = { base: resolve(opts.base), added: feature.added, changed: feature.changed, ids: feature.ids }; }
+    // A full round after an earlier one: chunk then takes only what is still open (see openLangs).
+    const previous = feature ? null : readProjectGlossary(p.dir)?.lastFullRound;
+    if (previous?.langs?.length) { snapshot.previousFullRound = previous; }
     mkdirSync(dir, { recursive: true });
     writeJson(join(dir, 'snapshot.json'), snapshot);
     writeJson(join(dir, 'units.json'), units);
@@ -352,6 +376,7 @@ export function commandSnapshot(opts) {
         status: 'snapshot',
         mode: feature ? 'feature' : 'full',
         ...(feature ? { feature: { base: snapshot.feature.base, added: feature.added, changed: feature.changed, outside: g.units.filter((u) => u.translate && !inScope.has(u.id)).length } } : {}),
+        ...(snapshot.previousFullRound ? { previousFullRound: snapshot.previousFullRound, open: Object.fromEntries(langs.map((l) => [l, units.filter((u) => !isBlank(u.src) && openLangs(u, langs, snapshot).includes(l)).length])) } : {}),
         work: dir,
         app: snapshot.app.name,
         commit: snapshot.commit,
@@ -554,9 +579,16 @@ export function commandExport(opts) {
         }
         sheets.push({ name: 'Termen', columns, rows, freeze: { columns: 2, rows: 1 }, autoFilter: true });
     } else {
+        // A round over what is still open shows per language only the strings open in that language, and only the
+        // terms those strings use: what the customer confirmed before does not come back.
+        const openOnly = work.review.scope === 'open';
+        const shown = (u, lang) => Boolean(work.review.units[u.id]?.[lang]) && !isBlank(u.src)
+            && (!openOnly || openLangs(u, langs, work.snapshot).includes(lang));
         if (glossary) {
+            const srcs = work.units.filter((u) => langs.some((l) => shown(u, l))).map((u) => u.src);
+            const terms = openOnly ? glossary.terms.filter((t) => { const re = termRegex(t); return srcs.some((s) => re.test(s)); }) : glossary.terms;
             const rows = [['Sleutel', 'Engels', ...langs, 'Toelichting'].map((h) => ({ v: h, s: STYLE.header }))];
-            for (const t of glossary.terms) { rows.push([t.key, t.en, ...langs.map((l) => t[l] ?? ''), t.note ?? '']); }
+            for (const t of terms) { rows.push([t.key, t.en, ...langs.map((l) => t[l] ?? ''), t.note ?? '']); }
             sheets.push({ name: 'Termen', columns: [{ width: 14, hidden: true }, { width: 26 }, ...langs.map(() => ({ width: 26 })), { width: 50 }], rows, freeze: { columns: 2, rows: 1 }, autoFilter: true });
         }
         const header = ['Sleutel', 'Waar', 'Engels', 'Huidig', 'Referentie', 'Oordeel', 'Reden', 'Focus', 'Definitief', 'Opmerking'];
@@ -564,8 +596,8 @@ export function commandExport(opts) {
         for (const lang of langs) {
             const rows = [header.map((h) => ({ v: h, s: STYLE.header }))];
             for (const u of work.units) {
-                const d = work.review.units[u.id]?.[lang];
-                if (!d || isBlank(u.src)) { continue; }
+                if (!shown(u, lang)) { continue; }
+                const d = work.review.units[u.id][lang];
                 const ref = u.ref?.[lang];
                 const refText = ref?.ms ? `BC: ${ref.ms}` : ref?.other ? `App: ${ref.other}` : '';
                 rows.push([u.id, readableContext(u.note), u.src, u.langs[lang].cur ?? '', refText, { v: d.v, s: verdictStyle(d.v) }, d.r ?? '', isFocus(u.cat, d.v) ? 'Ja' : 'Nee', finalFor(u, lang, d) ?? '', '']);
@@ -642,6 +674,8 @@ export function commandImportTerms(opts) {
         if (remark) { remarks.push({ key, en: term.en, remark }); }
         term.decided = today();
     }
+    // An unreadable project glossary stops here, before the work glossary takes the customer's terms.
+    if (opts.project) { projectGlossaryForWrite(opts.project); }
     writeJson(glossaryPath, glossary);
     const projectGlossary = opts.project ? writeProjectGlossary(opts.project, glossary) : null;
     return { status: 'terms-imported', glossary: glossaryPath, projectGlossary, kept, changed, unknown, remarks };
@@ -653,8 +687,14 @@ export function commandImportTerms(opts) {
 
 const reviewDir = (work) => join(work.dir, 'review');
 
-function isOpen(u, langs) {
-    return langs.some((l) => {
+/**
+ * The languages in which a string is still open: no translation, its English changed since, or a state that is not
+ * finished. A language the last full round did not cover is open throughout: its translations were never offered.
+ */
+function openLangs(u, langs, snapshot) {
+    const covered = snapshot.previousFullRound?.langs;
+    return langs.filter((l) => {
+        if (covered && !covered.includes(l)) { return true; }
         const x = u.langs[l];
         return x.cur === null || x.oldsrc !== undefined || !DONE_STATES.has(x.st);
     });
@@ -663,7 +703,8 @@ function isOpen(u, langs) {
 export function commandChunk(opts) {
     const work = loadWork(opts);
     const size = Number(opts.size ?? DEFAULT_CHUNK);
-    const scope = opts.scope ?? 'all';
+    // After a full round the next one offers only what is still open: what the customer confirmed does not come back.
+    const scope = opts.scope ?? (work.snapshot.previousFullRound ? 'open' : 'all');
     if (!['all', 'open'].includes(scope)) { throw new UsageError('--scope is all or open'); }
     const dir = reviewDir(work);
     if (existsSync(dir)) {
@@ -675,7 +716,8 @@ export function commandChunk(opts) {
     }
     mkdirSync(dir, { recursive: true });
 
-    const selected = work.units.filter((u) => !isBlank(u.src) && (scope === 'all' || isOpen(u, work.langs)));
+    writeJson(join(dir, 'chunk.json'), { snapshot: work.snapshot.created, scope });
+    const selected = work.units.filter((u) => !isBlank(u.src) && (scope === 'all' || openLangs(u, work.langs, work.snapshot).length));
     const groups = new Map();
     for (const u of selected) {
         if (!groups.has(u.obj)) { groups.set(u.obj, []); }
@@ -708,7 +750,15 @@ export function commandChunk(opts) {
         writeFileSync(join(dir, `in-${nn}.json`), `[\n${c.map((u) => JSON.stringify(slim(u))).join(',\n')}\n]\n`, 'utf8');
         return { chunk: nn, units: c.length, from: c[0].obj, to: c.at(-1).obj };
     });
-    return { status: 'chunked', scope, langs: work.langs, units: selected.length, chunks: list, dir };
+    return {
+        status: 'chunked',
+        scope,
+        ...(work.snapshot.previousFullRound ? { previousFullRound: work.snapshot.previousFullRound } : {}),
+        langs: work.langs,
+        units: selected.length,
+        chunks: list,
+        dir,
+    };
 }
 
 export function commandTm(opts) {
@@ -824,7 +874,7 @@ export function commandMerge(opts) {
         const { problems } = validateRows(inUnits, outRows, work.langs);
         if (problems.length) { invalid.push({ chunk: nn, problems: problems.length }); continue; }
         for (const r of outRows) {
-            rows.set(r.id, r);
+            rows.set(r.id, { ...r, chunk: nn });
             if (r.dev) { findings.push({ id: r.id, chunk: nn, note: r.dev }); }
         }
     }
@@ -833,11 +883,23 @@ export function commandMerge(opts) {
     }
 
     const unitById = new Map(work.units.map((u) => [u.id, u]));
+    const chunkInfo = existsSync(join(dir, 'chunk.json')) ? readJson(join(dir, 'chunk.json')) : {};
+    const scope = chunkInfo.snapshot === work.snapshot.created && chunkInfo.scope === 'open' ? 'open' : 'all';
+    // In an open round a language that is not open for a string is hidden from the customer: its finished translation
+    // stands. It is pinned to `ok`, so it votes with that text in the harmonisation below and an AI proposal the
+    // customer never sees cannot pull a visible string away from what they confirmed before.
+    const hiddenIn = (u) => (scope === 'open' ? work.langs.filter((l) => !openLangs(u, work.langs, work.snapshot).includes(l)) : []);
     const decisions = {};
     for (const [id, r] of rows) {
         decisions[id] = {};
+        const hidden = hiddenIn(unitById.get(id));
         for (const lang of work.langs) {
-            const { v, p, r: why } = r[lang];
+            // A verdict on a hidden language is not lost: it goes to the developer findings, not to the customer.
+            if (hidden.includes(lang) && r[lang].v !== 'ok') {
+                const x = r[lang];
+                findings.push({ id, chunk: r.chunk, note: `[${lang}] finished translation judged ${x.v}${x.p ? `: ${x.p}` : ''}${x.r ? ` (${x.r})` : ''}. Not in this round: change it by hand or with --scope all` });
+            }
+            const { v, p, r: why } = hidden.includes(lang) ? { v: 'ok' } : r[lang];
             decisions[id][lang] = { v, ...(v !== 'ok' ? { p } : {}), ...(why ? { r: why } : {}) };
         }
     }
@@ -861,42 +923,59 @@ export function commandMerge(opts) {
         }
         normalised++;
     };
+    // In an open round the strings finished in every language are not in the round, but their translation stands:
+    // they vote with it, as `ok`, so a new string with the same English follows what the customer confirmed before.
+    const voters = scope === 'open' ? work.units.filter((u) => !isBlank(u.src) && !decisions[u.id]) : [];
+    const decisionOf = (u, lang) => decisions[u.id]?.[lang] ?? { v: 'ok' };
     for (const lang of work.langs) {
         const groups = new Map();
-        for (const id of Object.keys(decisions)) {
-            const u = unitById.get(id);
+        for (const u of [...Object.keys(decisions).map((id) => unitById.get(id)), ...voters]) {
             const key = `${u.src}\u0000${kind(u.cat)}`;
             if (!groups.has(key)) { groups.set(key, []); }
             groups.get(key).push(u);
         }
         for (const list of groups.values()) {
             const src = list[0].src;
+            // A hidden language votes but is never rewritten: the customer does not see it, the import does not write it.
+            const shown = list.filter((u) => decisions[u.id] && !hiddenIn(u).includes(lang));
+            if (!shown.length) { continue; }
             const chosen = choices[`${lang}|${src}`];
-            if (chosen) { for (const u of list) { setText(u, lang, decisions[u.id][lang], chosen); } continue; }
+            if (chosen) {
+                for (const u of shown) { setText(u, lang, decisions[u.id][lang], chosen); }
+                // In an open round a choice reaches only the strings in it: a finished translation that differs stays
+                // listed, so the developer knows it changes only in a round over everything (--scope all).
+                const notReached = [...new Set(list.map((u) => finalFor(u, lang, decisionOf(u, lang))).filter((t) => t !== chosen))];
+                if (notReached.length) { inconsistencies.push({ lang, src, kind: kind(list[0].cat), chosen, notReached }); }
+                continue;
+            }
             const counts = new Map();
-            for (const u of list) { const t = finalFor(u, lang, decisions[u.id][lang]); counts.set(t, (counts.get(t) ?? 0) + 1); }
+            for (const u of list) { const t = finalFor(u, lang, decisionOf(u, lang)); counts.set(t, (counts.get(t) ?? 0) + 1); }
             if (counts.size < 2) { continue; }
             inconsistencies.push({ lang, src, kind: kind(list[0].cat), variants: Object.fromEntries(counts) });
             const best = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || a.length - b.length || a.localeCompare(b))[0];
-            for (const u of list) { setText(u, lang, decisions[u.id][lang], best); }
+            for (const u of shown) { setText(u, lang, decisions[u.id][lang], best); }
         }
     }
 
+    // The counts are of what the workbook will show: in an open round, a language only where the string is open.
     const counts = Object.fromEntries(work.langs.map((l) => [l, Object.fromEntries(VERDICTS.map((v) => [v, 0]))]));
     const focus = Object.fromEntries(work.langs.map((l) => [l, 0]));
     for (const [id, d] of Object.entries(decisions)) {
-        for (const lang of work.langs) {
+        const u = unitById.get(id);
+        const shownIn = scope === 'open' ? openLangs(u, work.langs, work.snapshot) : work.langs;
+        for (const lang of shownIn) {
             counts[lang][d[lang].v]++;
-            if (isFocus(unitById.get(id).cat, d[lang].v)) { focus[lang]++; }
+            if (isFocus(u.cat, d[lang].v)) { focus[lang]++; }
         }
     }
-    writeJson(join(work.dir, 'review.json'), { schema: SCHEMA, snapshot: work.snapshot.created, merged: new Date().toISOString(), langs: work.langs, units: decisions });
+    writeJson(join(work.dir, 'review.json'), { schema: SCHEMA, snapshot: work.snapshot.created, merged: new Date().toISOString(), scope, langs: work.langs, units: decisions });
     writeJson(join(dir, 'inconsistencies.json'), inconsistencies);
     writeJson(join(dir, 'developer-findings.json'), findings.map((f) => ({ ...f, src: unitById.get(f.id).src, ctx: unitById.get(f.id).note })));
     return {
         code: 0,
         result: {
             status: 'merged',
+            scope,
             reviewed: Object.keys(decisions).length,
             counts,
             focus,
@@ -1021,11 +1100,15 @@ export function commandImport(opts) {
     if (dropping.length && !dry && !opts['allow-drop']) {
         throw new UsageError(`the import would drop ${dropping.length} translation(s) of strings the .g.xlf no longer has (first: ${dropping.slice(0, 3).join(' | ')}). Check that the .g.xlf was compiled from this branch; --dry-run lists them, --allow-drop confirms`);
     }
+    // An unreadable project glossary stops the import here, before any translation file is written.
+    projectGlossaryForWrite(p.dir);
     // Every language is built before any file is written: a failure leaves all files as they were.
     if (!dry) { for (const r of Object.values(results)) { writeFileSync(r.file, r.text, 'utf8'); } }
     for (const r of Object.values(results)) { delete r.text; }
     const glossary = loadGlossary(work.dir);
-    const projectGlossary = glossary && !dry ? writeProjectGlossary(p.dir, glossary) : null;
+    // A full round records itself, so the next full round offers the customer only what is still open.
+    const fullRound = scope ? null : { date: today(), commit: work.snapshot.commit, langs: Object.keys(results) };
+    const projectGlossary = dry ? null : writeProjectGlossary(p.dir, glossary, { fullRound });
 
     const reportPath = join(work.dir, `import-report${dry ? '-dry-run' : ''}.json`);
     writeJson(reportPath, { imported: new Date().toISOString(), dryRun: dry, mode: scope ? 'feature' : 'full', warnings, results, remarks, ...(scope ? { newSinceSnapshot } : {}) });

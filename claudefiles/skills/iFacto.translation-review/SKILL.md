@@ -188,10 +188,24 @@ changed terms and the remarks.
 node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs chunk --work "<work>"
 ```
 
-`--scope open` for a later full round: only strings without a finished translation or with a
-changed English. The review then holds only those strings, and the customer workbook shows only
-them. In the feature mode run `chunk` without `--scope`: the snapshot holds only the branch's
-strings, and a translation the developer already wrote in the branch gets reviewed too. Then start **one general-purpose subagent per chunk, all in one message,
+**A later full round offers only what is still open.** The import of a full round records it in
+`<App>/translation-glossary.json` (`lastFullRound`: date, commit, languages). When the snapshot
+finds that record, `chunk` takes only what is still **open** by default: no translation, an
+English that changed since, or a state that is not finished. A language the last full round did
+not cover is open throughout. The customer workbook then shows, per language, only the strings
+open in that language, and only the glossary terms those strings use (the optional terms workbook
+of step 3 still shows the whole glossary). A language that is not open for a string keeps its
+finished translation: the merge holds it as `ok`, whatever a subagent proposes. That translation,
+and that of every string finished in all languages (left out of the round), still counts when the
+merge aligns the same English, so a new string follows what the customer confirmed before and is
+listed in `inconsistencies.json` when it differed. New strings or
+a new language make a round bigger again. The snapshot reports the
+record (`previousFullRound`) and the open count per language; give both to the developer. The
+first full round, without a record, reviews everything. `--scope all` reviews the whole app again:
+only when the developer asks for it.
+
+In the feature mode run `chunk` without `--scope`: the snapshot holds only the branch's strings,
+and a translation the developer already wrote in the branch gets reviewed too. Then start **one general-purpose subagent per chunk, all in one message,
 `model: "sonnet"`**, each with this prompt:
 
 ```
@@ -215,10 +229,13 @@ node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs m
 - The merge gives the same English the same translation, by majority, and lists what it
   aligned in `review/inconsistencies.json`. Where the majority is wrong (glossary, standard
   BC), put the right text in `review/choices.json` — `{"nl-BE|Delivery Method": "Leveringswijze"}`
-  — and merge again.
+  — and merge again. In a round over what is open, a choice reaches only the strings in the
+  round: a finished translation that differs stays listed (`notReached`) and changes only with
+  `--scope all`.
 - `review/developer-findings.json` holds what the reviewers found in the English or the code: a
-  label that must be `Locked = true`, a wrong English text. Report it to the developer as a
-  separate list; it is not for the customer.
+  label that must be `Locked = true`, a wrong English text. In a round over what is open it also
+  holds what a reviewer found wrong in a finished translation the round does not show. Report it to
+  the developer as a separate list; it is not for the customer.
 
 Report the verdict counts and the focus rows per language.
 
@@ -279,7 +296,11 @@ source's line when the file puts it there. The stats count the strings that were
   as they are. Nothing is dropped, so `--allow-drop` is not needed.
 
 The glossary goes into `<App>/translation-glossary.json` when a term changed, so the next round
-starts from the same terms. Unchanged terms leave the file as it is.
+starts from the same terms. Unchanged terms leave the file as it is. A full round also records
+itself there (`lastFullRound`), so the next full round offers only what is still open (step 4); a feature round
+keeps that record as it is. The file goes into the PR with the translations. A
+`translation-glossary.json` that is not valid JSON (a merge conflict) stops the import before any
+file is written: resolve it, then import again.
 
 The remarks (`Opmerking`) are in the report. Read them before the commit:
 
@@ -329,3 +350,10 @@ The remarks (`Opmerking`) are in the report. Read them before the commit:
   way. A string that is not rewritten keeps its notes; only rewritten and added strings take the
   notes of the `.g.xlf`.
 - **Headers.** The import reads the workbook by column name: renamed or deleted headers stop it.
+- **What a later full round leaves out.** A string with a finished translation does not come back,
+  whoever wrote it. A translation a developer typed in a feature without a feature round therefore
+  reaches the customer only through `--scope all`. The same holds for a rejected row whose old
+  translation was already finished: correct the workbook and import again in the same round.
+- **The record comes from master.** The snapshot of a full round reads `translation-glossary.json`
+  from `origin/master`: as long as the previous round's PR is not merged, the next round reviews
+  everything again.

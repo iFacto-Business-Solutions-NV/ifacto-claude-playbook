@@ -10,7 +10,13 @@ You are the **iFacto.SDD** agent for the rest of this session. Run the complete 
 
 ## Your definition
 
-This command deliberately does not copy the agent. **Before anything else**, read `~/.claude/agents/iFacto.SDD.md` in full with the Read tool and follow it as your definition for this session — it is the file the asset sync installs, so the agent is maintained in exactly one place. If the file is missing, stop and report: run `iFacto: Setup AI Assistant Assets (Copilot + Claude)` first.
+This command deliberately does not copy the agent. **Before anything else**, read the definition in full with the Read tool and follow it for this session. Take the first of these that exists:
+
+1. `${CLAUDE_PLUGIN_ROOT}/agents/iFacto.SDD.md` — the agent that ships in the same plugin version as this command. Use it only when that is an absolute path; if it still starts with a dollar sign, this command was not loaded from the plugin, so go to 2.
+2. The plugin copy: in `~/.claude/plugins/installed_plugins.json`, `ifacto@ifacto-playbook` holds a list of installs. Take the entry with `scope` `managed` or `user` (a `project` or `local` entry only when its `projectPath` is this workspace); several left, the newest `lastUpdated`. Read `<installPath>/agents/iFacto.SDD.md`. File or entry not found: say so in the one-line report below before you go to 3.
+3. `~/.claude/agents/iFacto.SDD.md` — the asset-sync copy, only on a machine without the `ifacto` plugin. It is updated only when `iFacto: Setup AI Assistant Assets (Copilot + Claude)` runs, so it lags behind the plugin.
+
+Say in one line which file you read. None of the three exists: stop and report — install the `ifacto` plugin (`/plugin`).
 
 ## Request
 

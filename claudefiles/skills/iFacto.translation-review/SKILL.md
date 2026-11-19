@@ -37,7 +37,8 @@ Without it there is no `.g.xlf` — stop and say so; adding it is a code change 
 new branch from master. The **feature mode** is for a ticket that adds strings: on the feature
 branch, only the strings the branch adds or changes since it left master are reviewed,
 checked and imported into the feature PR. Every other line of the translation files stays as it
-is. The branch the developer is on decides the scope (step 1); never narrow a round yourself.
+is. On the default branch only the full round is possible; on a feature branch the developer
+chooses (step 1). Never narrow a round yourself.
 
 Nobody prepares the glossary: step 2 builds it during the run, from the standard BC and
 DistriApps translations and the app's own strings. It keeps the parallel reviewers consistent —
@@ -67,14 +68,26 @@ a Windows profile path can hold a space.
 
 ### 1. Snapshot
 
-**Which scope.** The developer is on a feature branch for a ticket: the feature mode. Otherwise, or
-when the developer asks for the whole app: the full round, always on a worktree of
-`origin/master`. The script refuses a snapshot on a branch other than the remote's default
-branch (`origin/HEAD`; master or main when that is not set) without `--base`, because a full
-round there drags the untranslated strings of every other feature into that branch. `--full`
-overrides that guard only in a repository whose default branch the script does not recognise —
-never to run a full round on a feature branch. `origin/master` stands for the remote's default
-branch throughout this skill.
+**Which scope.** On the default branch: the full round, without asking — there is no branch to
+compare with. A request for the strings of a ticket or a branch while the developer is on the
+default branch is a stop, not a question: say the feature mode needs the feature branch checked
+out, and run nothing. On a feature branch both scopes are possible. When the request names one
+("the strings of my ticket", "the whole app"), take it. Otherwise ask with `AskUserQuestion`
+before the first snapshot or compile command, recommending the feature mode:
+
+- **Only this branch (Recommended)** — the strings the branch adds or changes since it left
+  master; the import goes into this feature PR.
+- **The whole app** — a full round on a worktree of `origin/master`: without this branch's own
+  strings, offering only what is still open since the last full round, or every string when no
+  full round is recorded on master yet (step 4), and imported later on a new branch from
+  master, in a PR of its own.
+
+The full round always runs on a worktree of `origin/master`. The script refuses a snapshot on a
+branch other than the remote's default branch (`origin/HEAD`; master or main when that is not
+set) without `--base`, because a full round there drags the untranslated strings of every other
+feature into that branch. `--full` overrides that guard only in a repository whose default
+branch the script does not recognise — never to run a full round on a feature branch.
+`origin/master` stands for the remote's default branch throughout this skill.
 
 **Full round — origin/master.** In a worktree, so the developer's checkout is untouched:
 

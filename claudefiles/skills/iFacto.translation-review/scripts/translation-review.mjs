@@ -4,7 +4,7 @@
 //
 // Part of the iFacto.translation-review skill. Zero dependencies, Node 18+.
 //
-// Usage:  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
+// Usage:  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--separate-variants] [--force]
 //         node translation-review.mjs terms        --work <dir> [--top 120]
 //         node translation-review.mjs export       --work <dir> --round terms|texts [--out <file.xlsx>]
 //         node translation-review.mjs import-terms --work <dir> --xlsx <file> [--project <App>]
@@ -41,7 +41,7 @@ const DONE_STATES = new Set(['translated', 'final', 'signed-off']);
 const BASE_COPY = 'base.g.xlf'; // the feature mode's base, kept in the work folder
 
 const USAGE = `Usage:
-  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--force]
+  node translation-review.mjs snapshot     --project <App> [--base <merge-base .g.xlf>] [--full] [--work <dir>] [--g <file>] [--packages <dir>] [--langs nl-BE,fr-BE] [--add-lang es-ES] [--commit <label>] [--separate-variants] [--force]
   node translation-review.mjs terms        --work <dir> [--top 120]
   node translation-review.mjs export       --work <dir> --round terms|texts [--out <file.xlsx>]
   node translation-review.mjs import-terms --work <dir> --xlsx <file> [--project <App>]
@@ -58,7 +58,7 @@ export class UsageError extends Error {}
  * Arguments and files
  * ------------------------------------------------------------------ */
 
-const FLAGS = new Set(['dry-run', 'force', 'allow-drop', 'full']);
+const FLAGS = new Set(['dry-run', 'force', 'allow-drop', 'full', 'separate-variants']);
 
 export function parseArgs(argv) {
     const [command, ...rest] = argv;
@@ -125,6 +125,97 @@ function loadWork(opts, { review = false } = {}) {
     }
     return work;
 }
+
+/* ------------------------------------------------------------------ *
+ * Language variants — nl-BE and nl-NL, fr-BE and fr-FR share one tab
+ * ------------------------------------------------------------------ */
+
+/**
+ * The groups of variants of one language in a round, lead first: one group per primary language with two or more
+ * variants. The lead is the variant with the most standard-BC reference translations (the one the customer works in:
+ * nl-BE in a Belgian project); on a tie -- a feature round whose strings have no reference -- the variant whose file
+ * holds the most translations, then the first in the round. Only the lead is reviewed; the others follow its text.
+ */
+export function variantGroups(langs, units, translated = {}) {
+    const byPrimary = new Map();
+    for (const l of langs) {
+        const k = l.split('-')[0].toLowerCase();
+        if (!byPrimary.has(k)) { byPrimary.set(k, []); }
+        byPrimary.get(k).push(l);
+    }
+    const ms = (l) => units.filter((u) => u.ref?.[l]?.ms).length;
+    return [...byPrimary.values()].filter((m) => m.length > 1).map((members) => {
+        const lead = [...members].sort((a, b) => ms(b) - ms(a) || (translated[b] ?? 0) - (translated[a] ?? 0) || members.indexOf(a) - members.indexOf(b))[0];
+        return [lead, ...members.filter((l) => l !== lead)];
+    });
+}
+
+/** The tabs of a workbook: one per language, or one per group of variants (`label` "nl-BE + nl-NL", lead first). */
+export function tabsOf(work) {
+    const groups = work.snapshot.variants ?? [];
+    const tabs = [];
+    for (const l of work.langs) {
+        const members = groups.find((g) => g.includes(l)) ?? [l];
+        if (tabs.some((t) => t.langs.includes(l))) { continue; }
+        tabs.push({ label: members.join(' + '), lead: members[0], langs: members });
+    }
+    return tabs;
+}
+
+/** The languages the reviewers judge: one per tab, the lead of each group of variants. */
+const reviewLangs = (work) => tabsOf(work).map((t) => t.lead);
+
+/** The languages of a workbook tab: "nl-BE", or "nl-BE + nl-NL" for a group of variants; null when it is not a language tab. */
+export function sheetLangs(name) {
+    const parts = String(name).split('+').map((s) => s.trim());
+    return parts.every((s) => LANG_SHEET.test(s)) ? parts.map(normLang) : null;
+}
+
+const FOLLOW_REASON = {
+    nl: (lead) => `zelfde tekst als ${lead}`,
+    fr: (lead) => `même texte que ${lead}`,
+    de: (lead) => `gleicher Text wie ${lead}`,
+    es: (lead) => `mismo texto que ${lead}`,
+};
+const followReason = (lang, lead) => (FOLLOW_REASON[lang.split('-')[0]] ?? ((l) => `same text as ${l}`))(lead);
+
+/**
+ * A variant's decision, from its lead's: the text the lead ends with. When the variant had the lead's old text, it
+ * gets the lead's verdict and reason; without a translation it is new; with another text it is aligned (stijl).
+ */
+function followerDecision(u, lang, lead, dLead) {
+    const text = finalFor(u, lead, dLead);
+    const cur = u.langs[lang].cur;
+    if (text === cur) { return { v: 'ok' }; }
+    if (cur === null) { return { v: 'nieuw', p: text }; }
+    if (cur === u.langs[lead].cur && dLead.v !== 'ok') { return { v: dLead.v, p: text, ...(dLead.r ? { r: dLead.r } : {}) }; }
+    return { v: 'stijl', p: text, r: followReason(lang, lead) };
+}
+
+const SEVERITY = ['fout', 'twijfel', 'nieuw', 'stijl', 'ok'];
+
+/** What a tab shows for a string: the most severe verdict of its languages, with that language's reason. */
+function tabVerdict(tab, d) {
+    return tab.langs.map((l) => d[l]).sort((a, b) => SEVERITY.indexOf(a.v) - SEVERITY.indexOf(b.v))[0];
+}
+
+/**
+ * Gives every variant the term of its lead: one translation per term for the whole group. Returns what changed; an
+ * entry with `from` overwrote a term the variant had (from an earlier round with --separate-variants, typically).
+ */
+function alignVariantTerms(glossary, work) {
+    const changed = [];
+    for (const tab of tabsOf(work)) {
+        for (const t of glossary?.terms ?? []) {
+            if (!t[tab.lead]) { continue; }
+            for (const f of tab.langs.slice(1)) {
+                if (t[f] !== t[tab.lead]) { changed.push({ key: t.key, lang: f, from: t[f] ?? null, to: t[tab.lead] }); t[f] = t[tab.lead]; }
+            }
+        }
+    }
+    return changed;
+}
+const overwritten = (aligned) => aligned.filter((a) => a.from !== null);
 
 const loadReference = (dir) => (existsSync(join(dir, 'reference.json')) ? readJson(join(dir, 'reference.json')) : {});
 const loadGlossary = (dir) => (existsSync(join(dir, 'glossary.json')) ? readJson(join(dir, 'glossary.json')) : null);
@@ -348,6 +439,10 @@ export function commandSnapshot(opts) {
         files: Object.fromEntries(langs.map((l) => [l, targets.find((t) => t.lang === l)?.path ?? null])),
         packages: { dir: existsSync(packages) ? packages : null, read },
     };
+    // Variants of one language share a tab and one review, unless the round keeps them apart.
+    const translated = Object.fromEntries(langs.map((l) => [l, [...byLang[l].values()].filter((t) => t.target).length]));
+    const variants = opts['separate-variants'] ? [] : variantGroups(langs, units, translated);
+    if (variants.length) { snapshot.variants = variants; }
     // The base goes into the work folder: the import needs it after the worktree is gone.
     if (feature) { snapshot.feature = { base: resolve(opts.base), added: feature.added, changed: feature.changed, ids: feature.ids }; }
     // A full round after an earlier one: chunk then takes only what is still open (see openLangs).
@@ -384,6 +479,7 @@ export function commandSnapshot(opts) {
         objects: new Set(units.map((u) => u.obj)).size,
         categories: units.reduce((a, u) => ({ ...a, [u.cat]: (a[u.cat] ?? 0) + 1 }), {}),
         langs: perLang,
+        variants: variants.map(([lead, ...follow]) => ({ lead, follow })),
         referencePackages: read.length,
         orphans: Object.fromEntries(langs.map((l) => [l, [...byLang[l].keys()].filter((id) => !gIds.has(id)).length])),
     };
@@ -432,6 +528,9 @@ export function commandTerms(opts) {
         seeded = true;
     }
     const glossary = readJson(glossaryPath);
+    // Variants share one term: what the lead says, the others say too.
+    const aligned = alignVariantTerms(glossary, work);
+    if (aligned.length) { writeJson(glossaryPath, glossary); }
     const covered = glossary.terms.flatMap(termPhrases).map((s) => s.toLowerCase());
 
     const counts = new Map();
@@ -462,6 +561,7 @@ export function commandTerms(opts) {
         glossary: glossaryPath,
         seeded,
         projectGlossary: existsSync(projectGlossaryPath) ? projectGlossaryPath : null,
+        alignedVariants: overwritten(aligned),
         terms: glossary.terms.map((t) => ({ key: t.key, en: t.en, count: countOf(t), ...Object.fromEntries(work.langs.map((l) => [l, t[l] ?? null])) })),
         candidates,
     };
@@ -474,26 +574,26 @@ export function commandTerms(opts) {
 const UITLEG = {
     terms: [
         ['Vertalingen nakijken - termen', STYLE.title],
-        ['Dit bestand bevat de kernbegrippen van de app met onze voorgestelde vertaling. Wat u hier kiest, passen we daarna toe op alle teksten.'],
+        ['Dit bestand bevat de kernbegrippen van de app met onze voorgestelde vertaling. Wat u hier kiest, passen we daarna toe op alle teksten.', undefined, 'nl'],
         ['Pas alleen de gele kolommen aan: Definitief per taal, en Opmerking. Definitief bevat al ons voorstel: laat het staan als het klopt, overschrijf het als het anders moet.'],
         ['Standaard BC en Andere apps tonen hoe Business Central en de andere apps hetzelfde begrip vertalen. Wijkt u daarvan af, dan ziet de gebruiker op hetzelfde scherm twee woorden voor hetzelfde.'],
         ['Sorteren en filteren mag. Verwijder geen rijen of kolommen en wijzig de kolom Engels niet.'],
         [''],
         ['Vérification des traductions - termes', STYLE.title],
-        ["Ce fichier contient les termes clés de l'application avec notre proposition de traduction. Ce que vous choisissez ici sera ensuite appliqué à tous les textes."],
+        ["Ce fichier contient les termes clés de l'application avec notre proposition de traduction. Ce que vous choisissez ici sera ensuite appliqué à tous les textes.", undefined, 'fr'],
         ['Modifiez uniquement les colonnes jaunes : Definitief par langue, et Opmerking (remarque). Definitief contient déjà notre proposition : laissez-la si elle est correcte, remplacez-la si elle doit changer.'],
         ["Standaard BC et Andere apps montrent comment Business Central et les autres applications traduisent le même terme. Si vous vous en écartez, l'utilisateur verra deux mots pour la même chose sur le même écran."],
         ['Vous pouvez trier et filtrer. Ne supprimez ni lignes ni colonnes et ne modifiez pas la colonne Engels.'],
         [''],
         ['Translation review - terms', STYLE.title],
-        ['This file holds the key terms of the app with our proposed translation. What you choose here is then applied to every text.'],
+        ['This file holds the key terms of the app with our proposed translation. What you choose here is then applied to every text.', undefined, 'en'],
         ['Only change the yellow columns: Definitief per language, and Opmerking (remarks). Definitief already holds our proposal: leave it when it is right, overwrite it when it must change.'],
         ['Standaard BC and Andere apps show how Business Central and the other apps translate the same term. If you deviate, users see two words for the same thing on one screen.'],
         ['Sorting and filtering are fine. Do not delete rows or columns, and do not change the Engels column.'],
     ],
     texts: [
         ['Vertalingen nakijken - teksten', STYLE.title],
-        ['Dit bestand bevat de vertaalbare teksten van de app, met een tabblad per taal.'],
+        ['Dit bestand bevat de vertaalbare teksten van de app, met een tabblad per taal.', undefined, 'nl'],
         ['Pas alleen de gele kolommen aan: Definitief en Opmerking. Definitief bevat al ons voorstel; een rij die u niet aanpast, nemen we over zoals ze er staat. Alleen Definitief wordt overgenomen: een opmerking verandert zelf geen tekst.'],
         ['Begin met de filter Focus = Ja: alles wat wij fout of twijfelachtig vinden, en nieuwe teksten op het scherm.'],
         ['Laat %1, %2 ... staan: daar vult Business Central een waarde in. Een backslash (\\) is een nieuwe regel.'],
@@ -503,7 +603,7 @@ const UITLEG = {
         ['Niet akkoord met een term? Pas Definitief aan in elke rij waarin hij voorkomt (filter de kolom Definitief op "bevat") en zet in de kolom Opmerking van één van die rijen welke term het moet zijn. Dan gebruiken we die term ook in volgende rondes.'],
         [''],
         ['Vérification des traductions - textes', STYLE.title],
-        ["Ce fichier contient les textes traduisibles de l'application, avec un onglet par langue."],
+        ["Ce fichier contient les textes traduisibles de l'application, avec un onglet par langue.", undefined, 'fr'],
         ['Modifiez uniquement les colonnes jaunes : Definitief et Opmerking (remarque). Definitief contient déjà notre proposition ; une ligne que vous ne modifiez pas est reprise telle quelle. Seule la colonne Definitief est reprise : une remarque ne modifie aucun texte.'],
         ['Commencez par le filtre Focus = Ja : tout ce que nous jugeons faux ou douteux, et les nouveaux textes à l\'écran.'],
         ['Laissez %1, %2 ... en place : Business Central y insère une valeur. Une barre oblique inverse (\\) est un saut de ligne.'],
@@ -513,7 +613,7 @@ const UITLEG = {
         ["Pas d'accord avec un terme ? Modifiez Definitief dans chaque ligne où il apparaît (filtrez la colonne Definitief sur « contient ») et indiquez dans la colonne Opmerking d'une de ces lignes le terme à utiliser. Nous l'utiliserons aussi lors des prochaines vérifications."],
         [''],
         ['Translation review - texts', STYLE.title],
-        ['This file holds the translatable texts of the app, with one tab per language.'],
+        ['This file holds the translatable texts of the app, with one tab per language.', undefined, 'en'],
         ['Only change the yellow columns: Definitief and Opmerking (remarks). Definitief already holds our proposal; a row you leave untouched is taken as it stands. Only Definitief is imported: a remark changes no text by itself.'],
         ['Start with the filter Focus = Ja: everything we consider wrong or doubtful, and new texts on screen.'],
         ['Leave %1, %2 ... in place: Business Central fills in a value there. A backslash (\\) is a line break.'],
@@ -524,11 +624,24 @@ const UITLEG = {
     ],
 };
 
-const uitlegSheet = (round) => ({
-    name: 'Uitleg',
-    columns: [{ width: 130, style: STYLE.text }],
-    rows: UITLEG[round].map(([text, style]) => [{ v: text, s: style ?? STYLE.text }]),
-});
+const VARIANTS_LINE = {
+    nl: (labels) => `Varianten van dezelfde taal staan samen (${labels}): de tekst die u kiest, gebruiken we voor elk van die talen.`,
+    fr: (labels) => `Les variantes d'une même langue sont regroupées (${labels}) : le texte que vous choisissez vaut pour chacune de ces langues.`,
+    en: (labels) => `Variants of the same language are grouped (${labels}): the text you choose is used for each of those languages.`,
+};
+
+/** The explanation sheet; with variants of a language in the round, each language block says they are grouped. */
+const uitlegSheet = (round, tabs = []) => {
+    const labels = tabs.filter((t) => t.langs.length > 1).map((t) => t.label).join('; ');
+    return {
+        name: 'Uitleg',
+        columns: [{ width: 130, style: STYLE.text }],
+        rows: UITLEG[round].flatMap(([text, style, variants]) => [
+            [{ v: text, s: style ?? STYLE.text }],
+            ...(variants && labels ? [[{ v: VARIANTS_LINE[variants](labels), s: STYLE.text }]] : []),
+        ]),
+    };
+};
 
 const metaSheet = (work, round) => ({
     name: '_meta',
@@ -542,6 +655,7 @@ const metaSheet = (work, round) => ({
         ['scope', work.snapshot.feature ? 'feature' : 'full'],
         ['created', today()],
         ['languages', work.langs.join(',')],
+        ['tabs', tabsOf(work).map((t) => t.label).join('; ')],
     ],
 });
 
@@ -561,7 +675,9 @@ export function commandExport(opts) {
     if (round === 'terms' && !glossary) { throw new UsageError(`${work.dir} holds no glossary.json — run terms first`); }
     const reference = loadReference(work.dir);
     const langs = work.langs;
-    const sheets = [uitlegSheet(round)];
+    // One tab (and one Definitief) per language, or per group of variants: the customer decides a text once.
+    const tabs = tabsOf(work);
+    const sheets = [uitlegSheet(round, tabs)];
 
     const countOf = (term) => {
         const re = termRegex(term);
@@ -569,40 +685,49 @@ export function commandExport(opts) {
     };
 
     if (round === 'terms') {
-        const header = ['Sleutel', 'Engels', 'Aantal teksten', 'Toelichting', ...langs.flatMap((l) => [`Standaard BC ${l}`, `Andere apps ${l}`, `Voorstel ${l}`, `Definitief ${l}`]), 'Opmerking'];
-        const columns = [{ width: 14, hidden: true }, { width: 26 }, { width: 9 }, { width: 40 }, ...langs.flatMap(() => [{ width: 20 }, { width: 20 }, { width: 22 }, { width: 22, style: STYLE.edit }]), { width: 30, style: STYLE.edit }];
+        const header = ['Sleutel', 'Engels', 'Aantal teksten', 'Toelichting', ...tabs.flatMap(({ label }) => [`Standaard BC ${label}`, `Andere apps ${label}`, `Voorstel ${label}`, `Definitief ${label}`]), 'Opmerking'];
+        const columns = [{ width: 14, hidden: true }, { width: 26 }, { width: 9 }, { width: 40 }, ...tabs.flatMap(() => [{ width: 20 }, { width: 20 }, { width: 22 }, { width: 22, style: STYLE.edit }]), { width: 30, style: STYLE.edit }];
         const rows = [header.map((h) => ({ v: h, s: STYLE.header }))];
         const terms = [...glossary.terms].map((t) => ({ t, n: countOf(t) })).sort((a, b) => b.n - a.n || a.t.en.localeCompare(b.t.en));
         for (const { t, n } of terms) {
-            const refs = langs.map((l) => referenceFor(reference, l, termPhrases(t)[0]));
-            rows.push([t.key, t.en, String(n), t.note ?? '', ...langs.flatMap((l, i) => [refs[i].ms ?? '', refs[i].other ?? '', t[l] ?? '', t[l] ?? '']), '']);
+            // A group shows the reference of its lead, else of the first variant that has one.
+            const refs = tabs.map((tab) => {
+                const all = tab.langs.map((l) => referenceFor(reference, l, termPhrases(t)[0]));
+                return { ms: all.find((r) => r.ms)?.ms ?? null, other: all.find((r) => r.other)?.other ?? null };
+            });
+            rows.push([t.key, t.en, String(n), t.note ?? '', ...tabs.flatMap((tab, i) => [refs[i].ms ?? '', refs[i].other ?? '', t[tab.lead] ?? '', t[tab.lead] ?? '']), '']);
         }
         sheets.push({ name: 'Termen', columns, rows, freeze: { columns: 2, rows: 1 }, autoFilter: true });
     } else {
-        // A round over what is still open shows per language only the strings open in that language, and only the
+        // A round over what is still open shows per tab only the strings open in one of its languages, and only the
         // terms those strings use: what the customer confirmed before does not come back.
         const openOnly = work.review.scope === 'open';
-        const shown = (u, lang) => Boolean(work.review.units[u.id]?.[lang]) && !isBlank(u.src)
-            && (!openOnly || openLangs(u, langs, work.snapshot).includes(lang));
+        const shown = (u, tab) => Boolean(work.review.units[u.id]?.[tab.lead]) && !isBlank(u.src)
+            && (!openOnly || openLangs(u, langs, work.snapshot).some((l) => tab.langs.includes(l)));
         if (glossary) {
-            const srcs = work.units.filter((u) => langs.some((l) => shown(u, l))).map((u) => u.src);
+            const srcs = work.units.filter((u) => tabs.some((t) => shown(u, t))).map((u) => u.src);
             const terms = openOnly ? glossary.terms.filter((t) => { const re = termRegex(t); return srcs.some((s) => re.test(s)); }) : glossary.terms;
-            const rows = [['Sleutel', 'Engels', ...langs, 'Toelichting'].map((h) => ({ v: h, s: STYLE.header }))];
-            for (const t of terms) { rows.push([t.key, t.en, ...langs.map((l) => t[l] ?? ''), t.note ?? '']); }
-            sheets.push({ name: 'Termen', columns: [{ width: 14, hidden: true }, { width: 26 }, ...langs.map(() => ({ width: 26 })), { width: 50 }], rows, freeze: { columns: 2, rows: 1 }, autoFilter: true });
+            const rows = [['Sleutel', 'Engels', ...tabs.map((t) => t.label), 'Toelichting'].map((h) => ({ v: h, s: STYLE.header }))];
+            for (const t of terms) { rows.push([t.key, t.en, ...tabs.map((tab) => t[tab.lead] ?? ''), t.note ?? '']); }
+            sheets.push({ name: 'Termen', columns: [{ width: 14, hidden: true }, { width: 26 }, ...tabs.map(() => ({ width: 26 })), { width: 50 }], rows, freeze: { columns: 2, rows: 1 }, autoFilter: true });
         }
-        const header = ['Sleutel', 'Waar', 'Engels', 'Huidig', 'Referentie', 'Oordeel', 'Reden', 'Focus', 'Definitief', 'Opmerking'];
-        const columns = [{ width: 18, hidden: true }, { width: 36 }, { width: 36 }, { width: 36 }, { width: 24 }, { width: 10 }, { width: 40 }, { width: 8 }, { width: 36, style: STYLE.edit }, { width: 30, style: STYLE.edit }];
-        for (const lang of langs) {
+        const refTextOf = (u, l) => { const ref = u.ref?.[l]; return ref?.ms ? `BC: ${ref.ms}` : ref?.other ? `App: ${ref.other}` : ''; };
+        for (const tab of tabs) {
+            const group = tab.langs.length > 1;
+            // A group shows the current text of every variant, so the customer sees where they differ today.
+            const header = ['Sleutel', 'Waar', 'Engels', ...(group ? tab.langs.map((l) => `Huidig ${l}`) : ['Huidig']), 'Referentie', 'Oordeel', 'Reden', 'Focus', 'Definitief', 'Opmerking'];
+            const columns = [{ width: 18, hidden: true }, { width: 36 }, { width: 36 }, ...tab.langs.map(() => ({ width: 36 })), { width: 24 }, { width: 10 }, { width: 40 }, { width: 8 }, { width: 36, style: STYLE.edit }, { width: 30, style: STYLE.edit }];
             const rows = [header.map((h) => ({ v: h, s: STYLE.header }))];
             for (const u of work.units) {
-                if (!shown(u, lang)) { continue; }
-                const d = work.review.units[u.id][lang];
-                const ref = u.ref?.[lang];
-                const refText = ref?.ms ? `BC: ${ref.ms}` : ref?.other ? `App: ${ref.other}` : '';
-                rows.push([u.id, readableContext(u.note), u.src, u.langs[lang].cur ?? '', refText, { v: d.v, s: verdictStyle(d.v) }, d.r ?? '', isFocus(u.cat, d.v) ? 'Ja' : 'Nee', finalFor(u, lang, d) ?? '', '']);
+                if (!shown(u, tab)) { continue; }
+                const d = work.review.units[u.id];
+                const refs = tab.langs.map((l) => [l, refTextOf(u, l)]).filter(([, t]) => t);
+                const refText = new Set(refs.map(([, t]) => t)).size > 1 ? refs.map(([l, t]) => `${l} ${t}`).join(' | ') : refs[0]?.[1] ?? '';
+                // Each variant has its decision (merge derives the followers'); the tab shows the most severe one.
+                const v = group && tab.langs.every((l) => d[l]) ? tabVerdict(tab, d) : d[tab.lead];
+                rows.push([u.id, readableContext(u.note), u.src, ...tab.langs.map((l) => u.langs[l].cur ?? ''), refText, { v: v.v, s: verdictStyle(v.v) }, v.r ?? '', isFocus(u.cat, v.v) ? 'Ja' : 'Nee', finalFor(u, tab.lead, d[tab.lead]) ?? '', '']);
             }
-            sheets.push({ name: lang, columns, rows, freeze: { columns: 3, rows: 1 }, autoFilter: true });
+            sheets.push({ name: tab.label, columns, rows, freeze: { columns: 3, rows: 1 }, autoFilter: true });
         }
     }
     sheets.push(metaSheet(work, round));
@@ -654,7 +779,8 @@ export function commandImportTerms(opts) {
     if (meta && meta.round !== 'terms') { throw new UsageError(`this workbook is round "${meta.round}", not the terms round`); }
     const sheet = sheets.find((s) => s.name === 'Termen');
     if (!sheet) { throw new UsageError('the workbook has no Termen sheet'); }
-    requireColumns(sheet, ['Sleutel', 'Engels', ...work.langs.map((l) => `Definitief ${l}`)]);
+    const tabs = tabsOf(work);
+    requireColumns(sheet, ['Sleutel', 'Engels', ...tabs.map((t) => `Definitief ${t.label}`)]);
 
     const changed = [];
     const unknown = [];
@@ -664,11 +790,14 @@ export function commandImportTerms(opts) {
         const key = cellText(rec.Sleutel).trim();
         const term = glossary.terms.find((t) => t.key === key);
         if (!term) { unknown.push({ row: rec._row, key, en: cellText(rec.Engels) }); continue; }
-        for (const lang of work.langs) {
-            const value = cellText(rec[`Definitief ${lang}`]).trim();
-            if (!value || value === (term[lang] ?? '')) { kept++; continue; }
-            changed.push({ key, en: term.en, lang, from: term[lang] ?? null, to: value });
-            term[lang] = value;
+        // A group of variants has one column: its term goes to every variant.
+        for (const tab of tabs) {
+            const value = cellText(rec[`Definitief ${tab.label}`]).trim();
+            for (const lang of tab.langs) {
+                if (!value || value === (term[lang] ?? '')) { kept++; continue; }
+                changed.push({ key, en: term.en, lang, from: term[lang] ?? null, to: value });
+                term[lang] = value;
+            }
         }
         const remark = cellText(rec.Opmerking).trim();
         if (remark) { remarks.push({ key, en: term.en, remark }); }
@@ -735,12 +864,18 @@ export function commandChunk(opts) {
         if (u.dev) { r.dev = u.dev; }
         if (u.maxw) { r.maxw = u.maxw; }
         if (u.ph) { r.ph = u.ph; }
-        for (const lang of work.langs) {
+        // The reviewers judge the lead of each group of variants; the variants that follow its text come along as
+        // `var`, so the proposal can suit them too.
+        for (const tab of tabsOf(work)) {
+            const lang = tab.lead;
             const x = u.langs[lang];
             const c = { cur: x.cur, st: x.st };
             if (x.oldsrc !== undefined) { c.oldsrc = x.oldsrc; }
             if (u.ref?.[lang]?.ms) { c.ms = u.ref[lang].ms; }
             if (u.ref?.[lang]?.other) { c.other = u.ref[lang].other; }
+            if (tab.langs.length > 1) {
+                c.var = Object.fromEntries(tab.langs.slice(1).map((f) => [f, { cur: u.langs[f].cur, ...(u.ref?.[f]?.ms ? { ms: u.ref[f].ms } : {}) }]));
+            }
             r[lang] = c;
         }
         return r;
@@ -754,7 +889,8 @@ export function commandChunk(opts) {
         status: 'chunked',
         scope,
         ...(work.snapshot.previousFullRound ? { previousFullRound: work.snapshot.previousFullRound } : {}),
-        langs: work.langs,
+        langs: reviewLangs(work),
+        ...(work.snapshot.variants ? { variants: work.snapshot.variants.map(([lead, ...follow]) => ({ lead, follow })) } : {}),
         units: selected.length,
         chunks: list,
         dir,
@@ -839,7 +975,7 @@ export function commandValidate(opts) {
     if (!existsSync(outPath)) { return { code: 1, text: `out-${nn}.json does not exist — run join first` }; }
     let outRows;
     try { outRows = readJson(outPath); } catch (e) { return { code: 1, text: `out-${nn}.json is not valid JSON: ${e.message}` }; }
-    const { covered, total, problems } = validateRows(inUnits, outRows, work.langs);
+    const { covered, total, problems } = validateRows(inUnits, outRows, reviewLangs(work));
     const text = [`${covered}/${total} units covered, ${problems.length} problems`, ...problems.slice(0, 200).map((p) => ` - ${p}`)].join('\n');
     return { code: problems.length ? 1 : 0, text };
 }
@@ -871,7 +1007,7 @@ export function commandMerge(opts) {
         if (!existsSync(outPath)) { missingChunks.push(nn); continue; }
         const inUnits = readJson(join(dir, f));
         const outRows = readJson(outPath);
-        const { problems } = validateRows(inUnits, outRows, work.langs);
+        const { problems } = validateRows(inUnits, outRows, reviewLangs(work));
         if (problems.length) { invalid.push({ chunk: nn, problems: problems.length }); continue; }
         for (const r of outRows) {
             rows.set(r.id, { ...r, chunk: nn });
@@ -889,15 +1025,22 @@ export function commandMerge(opts) {
     // stands. It is pinned to `ok`, so it votes with that text in the harmonisation below and an AI proposal the
     // customer never sees cannot pull a visible string away from what they confirmed before.
     const hiddenIn = (u) => (scope === 'open' ? work.langs.filter((l) => !openLangs(u, work.langs, work.snapshot).includes(l)) : []);
+    // Only the lead of each group of variants is reviewed; the variants follow its text after the harmonisation.
+    const tabs = tabsOf(work);
+    const leads = tabs.map((t) => t.lead);
     const decisions = {};
     for (const [id, r] of rows) {
         decisions[id] = {};
         const hidden = hiddenIn(unitById.get(id));
-        for (const lang of work.langs) {
+        for (const lang of leads) {
             // A verdict on a hidden language is not lost: it goes to the developer findings, not to the customer.
             if (hidden.includes(lang) && r[lang].v !== 'ok') {
                 const x = r[lang];
-                findings.push({ id, chunk: r.chunk, note: `[${lang}] finished translation judged ${x.v}${x.p ? `: ${x.p}` : ''}${x.r ? ` (${x.r})` : ''}. Not in this round: change it by hand or with --scope all` });
+                // A lead whose group tab is shown (a variant is open) is in the workbook, kept as it is.
+                const tab = tabs.find((t) => t.lead === lang);
+                const inTab = tab.langs.length > 1 && !tab.langs.every((l) => hidden.includes(l));
+                const where = inTab ? `Kept as it is in the ${tab.label} tab: the customer can change it there` : 'Not in this round: change it by hand or with --scope all';
+                findings.push({ id, chunk: r.chunk, note: `[${lang}] finished translation judged ${x.v}${x.p ? `: ${x.p}` : ''}${x.r ? ` (${x.r})` : ''}. ${where}` });
             }
             const { v, p, r: why } = hidden.includes(lang) ? { v: 'ok' } : r[lang];
             decisions[id][lang] = { v, ...(v !== 'ok' ? { p } : {}), ...(why ? { r: why } : {}) };
@@ -927,7 +1070,7 @@ export function commandMerge(opts) {
     // they vote with it, as `ok`, so a new string with the same English follows what the customer confirmed before.
     const voters = scope === 'open' ? work.units.filter((u) => !isBlank(u.src) && !decisions[u.id]) : [];
     const decisionOf = (u, lang) => decisions[u.id]?.[lang] ?? { v: 'ok' };
-    for (const lang of work.langs) {
+    for (const lang of leads) {
         const groups = new Map();
         for (const u of [...Object.keys(decisions).map((id) => unitById.get(id)), ...voters]) {
             const key = `${u.src}\u0000${kind(u.cat)}`;
@@ -957,15 +1100,25 @@ export function commandMerge(opts) {
         }
     }
 
-    // The counts are of what the workbook will show: in an open round, a language only where the string is open.
-    const counts = Object.fromEntries(work.langs.map((l) => [l, Object.fromEntries(VERDICTS.map((v) => [v, 0]))]));
-    const focus = Object.fromEntries(work.langs.map((l) => [l, 0]));
+    // A tab is shown for a string when one of its languages is open (in a round over everything: always). There every
+    // variant takes the text its lead ends with; where the tab is not shown, a variant keeps its finished translation.
+    const tabShown = (u, tab) => scope !== 'open' || openLangs(u, work.langs, work.snapshot).some((l) => tab.langs.includes(l));
+    for (const tab of tabs.filter((t) => t.langs.length > 1)) {
+        for (const [id, d] of Object.entries(decisions)) {
+            const u = unitById.get(id);
+            for (const f of tab.langs.slice(1)) { d[f] = tabShown(u, tab) ? followerDecision(u, f, tab.lead, d[tab.lead]) : { v: 'ok' }; }
+        }
+    }
+
+    // The counts are of what the workbook will show, per tab: in an open round, a tab only where the string is open.
+    const counts = Object.fromEntries(tabs.map((t) => [t.label, Object.fromEntries(VERDICTS.map((v) => [v, 0]))]));
+    const focus = Object.fromEntries(tabs.map((t) => [t.label, 0]));
     for (const [id, d] of Object.entries(decisions)) {
         const u = unitById.get(id);
-        const shownIn = scope === 'open' ? openLangs(u, work.langs, work.snapshot) : work.langs;
-        for (const lang of shownIn) {
-            counts[lang][d[lang].v]++;
-            if (isFocus(u.cat, d[lang].v)) { focus[lang]++; }
+        for (const tab of tabs.filter((t) => tabShown(u, t))) {
+            const { v } = tabVerdict(tab, d);
+            counts[tab.label][v]++;
+            if (isFocus(u.cat, v)) { focus[tab.label]++; }
         }
     }
     writeJson(join(work.dir, 'review.json'), { schema: SCHEMA, snapshot: work.snapshot.created, merged: new Date().toISOString(), scope, langs: work.langs, units: decisions });
@@ -1012,8 +1165,12 @@ export function commandImport(opts) {
         warnings.push(`the workbook comes from a ${meta.scope} round, the work folder is a ${workScope} round: only rows within this work folder's scope are imported`);
     }
     for (const s of sheets) {
-        if (!s.hidden && !LANG_SHEET.test(s.name) && !INFO_SHEETS.includes(s.name)) { warnings.push(`sheet "${s.name}" is not a language tab and was ignored`); }
+        if (!s.hidden && !sheetLangs(s.name) && !INFO_SHEETS.includes(s.name)) { warnings.push(`sheet "${s.name}" is not a language tab and was ignored`); }
     }
+    // A tab is one language, or a group of variants ("nl-BE + nl-NL") whose Definitief goes to each of them.
+    const langSheets = sheets.filter((s) => !s.hidden && sheetLangs(s.name)).flatMap((sheet) => sheetLangs(sheet.name).map((lang, i) => ({ sheet, lang, first: i === 0 })));
+    const twice = langSheets.map((x) => x.lang).filter((l, i, all) => all.indexOf(l) !== i);
+    if (twice.length) { throw new UsageError(`the workbook has more than one tab for ${[...new Set(twice)].join(', ')} — keep one tab per language`); }
     const p = projectFiles(need(opts, 'project'), opts.g);
     const g = parseXlf(readFileSync(p.gFile, 'utf8'));
     const gById = new Map(g.units.map((u) => [u.id, u]));
@@ -1029,8 +1186,7 @@ export function commandImport(opts) {
 
     const results = {};
     const remarks = [];
-    for (const sheet of sheets.filter((s) => LANG_SHEET.test(s.name) && !s.hidden)) {
-        const lang = normLang(sheet.name);
+    for (const { sheet, lang, first } of langSheets) {
         requireColumns(sheet, ['Sleutel', 'Engels', 'Definitief']);
         const current = currents.find((c) => c.lang === lang) ?? null;
         if (scope && !current?.parsed.units.length) {
@@ -1063,8 +1219,9 @@ export function commandImport(opts) {
             const proposal = d ? (d.v === 'ok' ? curById.get(key)?.target ?? null : d.p) : null;
             if (text === curById.get(key)?.target) { r.unchanged++; }
             if (proposal !== null && text === proposal) { r.proposal++; } else { r.changedByCustomer++; }
+            // A remark is the row's, not the language's: a group of variants reports it once, under its tab.
             const remark = cellText(rec.Opmerking).trim();
-            if (remark) { remarks.push({ lang, key, ctx: readableContext(gu.notes['Xliff Generator'] ?? ''), en, remark }); }
+            if (remark && first) { remarks.push({ lang: sheetLangs(sheet.name).join(' + '), key, ctx: readableContext(gu.notes['Xliff Generator'] ?? ''), en, remark }); }
         }
         // An empty enum value has nothing to translate: it keeps the source as it is.
         for (const u of g.units) {
@@ -1106,6 +1263,8 @@ export function commandImport(opts) {
     if (!dry) { for (const r of Object.values(results)) { writeFileSync(r.file, r.text, 'utf8'); } }
     for (const r of Object.values(results)) { delete r.text; }
     const glossary = loadGlossary(work.dir);
+    // Variants share one term in the project glossary too.
+    const aligned = alignVariantTerms(glossary, work);
     // A full round records itself, so the next full round offers the customer only what is still open.
     const fullRound = scope ? null : { date: today(), commit: work.snapshot.commit, langs: Object.keys(results) };
     const projectGlossary = dry ? null : writeProjectGlossary(p.dir, glossary, { fullRound });
@@ -1119,6 +1278,7 @@ export function commandImport(opts) {
         ...(scope ? { newSinceSnapshot: brief(newSinceSnapshot) } : {}),
         report: reportPath,
         projectGlossary,
+        alignedVariants: overwritten(aligned),
         warnings,
         remarks: remarks.length,
         langs: Object.fromEntries(Object.entries(results).map(([lang, r]) => [lang, {

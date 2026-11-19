@@ -49,6 +49,15 @@ it only when the developer asks for it, for instance for an app with many of the
 concepts. Objections to a term then come back in the Opmerking column of step 5; carry them into
 the glossary for the next round.
 
+**Language variants share one tab.** Variants of one language in the same round — nl-BE and
+nl-NL, fr-BE and fr-FR — form a group: one tab ("nl-BE + nl-NL"), one Definitief per string, and
+one glossary term. The customer decides each text once; the import writes it into the file of
+every variant, each with its own checks. The **lead** is the variant with the most standard-BC
+references (in a Belgian project nl-BE and fr-BE; on a tie, the fullest translation file); only
+the lead is reviewed, and the other variants take its text. The snapshot reports the groups
+(`variants`). `snapshot --separate-variants` keeps every language on its own tab: only when the
+developer asks, for a customer who wants different texts per country.
+
 A customer round takes days. It ends the session's work: hand over the workbook and stop.
 
 ## The work folder
@@ -145,6 +154,8 @@ that leaves nothing to review, `--base` together with `--full`, and a language w
 translation file (a new language is a full round).
 
 - `--langs nl-BE,fr-BE` limits the languages; `--add-lang es-ES` adds one that has no file yet.
+- `variants` lists the groups of language variants and their lead (see "Language variants share
+  one tab" above); `--separate-variants` turns the grouping off. Give both to the developer.
 - The output gives, per language, the states (`missing` = not in the file at all), the strings
   whose English changed since they were translated (`stale`), and how many strings have an exact
   standard-BC or DistriApps translation (`refMatches`). `referencePackages: 0` means there are
@@ -169,7 +180,10 @@ Complete the glossary with the Edit tool:
   30–80 target is for a full round, and every added term lands in the feature PR's
   `translation-glossary.json`.
 - Per term and language: the standard-BC translation first, the DistriApps one when it is
-  right, else your own proposal. A `note` in Dutch when the choice needs explaining.
+  right, else your own proposal. A `note` in Dutch when the choice needs explaining. A variant
+  takes the term of its lead: fill in the lead, and the next `terms` run copies it. A term the
+  variant had of its own is then overwritten: `terms` and `import` list those in
+  `alignedVariants`. Report them to the developer.
 - Shape of a term: `{"key": "delivery-method", "en": "Delivery Method", "match": ["Delivery
   Method"], "nl-BE": "Leveringswijze", "fr-BE": "Mode de livraison", "note": "…"}` — `match`
   lists the English forms to find it by (default: `en`).
@@ -244,13 +258,21 @@ node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs m
   BC), put the right text in `review/choices.json` — `{"nl-BE|Delivery Method": "Leveringswijze"}`
   — and merge again. In a round over what is open, a choice reaches only the strings in the
   round: a finished translation that differs stays listed (`notReached`) and changes only with
-  `--scope all`.
+  `--scope all`. With variants, a choice is keyed on the lead (`nl-BE|…`); the variants follow
+  it, and a key on a variant is ignored.
 - `review/developer-findings.json` holds what the reviewers found in the English or the code: a
   label that must be `Locked = true`, a wrong English text. In a round over what is open it also
   holds what a reviewer found wrong in a finished translation the round does not show. Report it to
   the developer as a separate list; it is not for the customer.
 
-Report the verdict counts and the focus rows per language.
+Report the verdict counts and the focus rows per tab: a language, or a group of variants.
+
+With variants, the subagents review only the lead; each lead in the chunk carries `var`, the
+current text of the variants that follow it. The merge then gives every variant the text its lead
+ends with: the lead's verdict where the variant had the lead's old text, `nieuw` where it had
+none, `stijl` where it had another text. In a round over what is still open, a string comes back
+in the group tab when one of its variants is open; a finished lead then stays `ok`, and the open
+variant takes its text.
 
 ### 5. Customer round — the texts
 
@@ -258,9 +280,10 @@ Report the verdict counts and the focus rows per language.
 node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs export --work "<work>" --round texts
 ```
 
-Tell the developer the workbook path, the number of focus rows per language, and who has to
-check each language: a language nobody at the customer checks goes in as our proposal,
-unchecked. Share it as one file. Stop here: the import, its dry run included, starts when the
+Tell the developer the workbook path, the number of focus rows per tab, and who has to
+check each tab: a language nobody at the customer checks goes in as our proposal,
+unchecked. A group tab shows the current text of every variant (`Huidig nl-BE`, `Huidig nl-NL`)
+and the most severe verdict of its languages. Share it as one file. Stop here: the import, its dry run included, starts when the
 workbook is back (step 6).
 
 ### 6. Import
@@ -273,7 +296,9 @@ branch. Then:
 node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs import --work "<work>" --xlsx "<file>" --project "<repo>/<App>" --dry-run
 ```
 
-Report per language: rows, proposals taken, texts changed by the customer, and:
+Report per language: rows, proposals taken, texts changed by the customer, and the items below.
+A group tab is imported into the file of each of its variants, so it reports once per variant;
+its remarks come once, under the tab. Two tabs for one language stop the import.
 
 - **rejected** — the text breaks a placeholder, the option count, the maximum length or the
   spacing; or Excel stored it as a number or date. Show them with the reason; they stay as they
@@ -363,6 +388,10 @@ The remarks (`Opmerking`) are in the report. Read them before the commit:
   way. A string that is not rewritten keeps its notes; only rewritten and added strings take the
   notes of the `.g.xlf`.
 - **Headers.** The import reads the workbook by column name: renamed or deleted headers stop it.
+- **Variants follow their lead.** Standard BC sometimes translates a country-specific concept
+  differently in nl-BE and nl-NL, or in fr-BE and fr-FR. With one tab, the follower takes the lead's
+  text, even where its own finished translation said otherwise. A customer who wants different
+  texts per country needs a round with `--separate-variants`.
 - **What a later full round leaves out.** A string with a finished translation does not come back,
   whoever wrote it. A translation a developer typed in a feature without a feature round therefore
   reaches the customer only through `--scope all`. The same holds for a rejected row whose old

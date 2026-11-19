@@ -34,7 +34,12 @@ A JSON array, one object per string (trans-unit), grouped per AL object:
 | `dev` | developer comment, often explains the placeholders (optional) |
 | `maxw` | maximum length (optional) |
 | `ph` | the placeholders of the source (optional) |
-| `<lang>` | per language: `cur` the current translation (null = none), `st` its state, `oldsrc` the old English when the source changed since it was translated, `ms` the standard BC translation of exactly this English, `other` the translation another app (DistriApps, iFacto) uses |
+| `<lang>` | per language: `cur` the current translation (null = none), `st` its state, `oldsrc` the old English when the source changed since it was translated, `ms` the standard BC translation of exactly this English, `other` the translation another app (DistriApps, iFacto) uses, `var` (optional) the variants of this language that take your text — see below |
+
+**Variants.** When the round has variants of one language (nl-BE and nl-NL, fr-BE and fr-FR),
+only the lead is in your chunk. Its `var` holds per variant its current text (`cur`) and its
+standard BC translation (`ms`, when there is one). Your proposal is written into every variant's
+file, so it must read right in each of them. Judge the lead; do not output the variants.
 
 States: `translated` (set by someone — still not necessarily right), `needs-review-*` (machine
 translated and never reviewed — expect literal nonsense), `needs-translation`,
@@ -42,7 +47,7 @@ translated and never reviewed — expect literal nonsense), `needs-translation`,
 
 ## Output
 
-One object per input string, every language present:
+One object per input string, every language of the input present:
 
 ```json
 {"id":"<id>","nl-BE":{"v":"ok"},"fr-BE":{"v":"fout","p":"Mode de livraison","r":"« Méthode de diffusion » n'est pas une notion de livraison"}}

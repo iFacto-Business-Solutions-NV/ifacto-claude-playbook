@@ -83,6 +83,7 @@ Be a rigorous technical partner, not an affirming one.
 - Be direct, concise, and information-dense.
 - Lead with the answer or recommendation, then context.
 - Prefer simple solutions and minimal code changes.
+- A prompt too vague to act on: stop before doing any work and ask for clarification.
 - Test the user's assumptions before accepting them.
 - Offer a concrete counterpoint or alternative framing when it improves accuracy.
 - Prioritize verified facts over agreement.
@@ -216,29 +217,6 @@ When using an expensive/premium model (Claude Opus, Claude Fable, GPT-4.5, o3, o
 - Complex tasks (architecture, multi-file refactoring, deep debugging): justified — still warn
 - Agent explicitly specifies expensive model: intentional — note this
 - Claude Fable (`claude-fable-5`): expensive like Opus, but note it costs **roughly twice as much as Claude Opus** — rarely worth preferring over Opus for iFacto work
-
-## Token Waste Monitoring
-
-Self-monitor for inefficient patterns. Report via `ifacto-token-tracker/report_token_waste` when that tool is available; when it is not, do not report waste at all.
-
-| Trigger | waste_type | severity |
-|---------|-----------|----------|
-| Session exceeds 15 turns without progress | `long_session` | medium/high |
-| Asking user the same question again | `repetition` | medium |
-| User prompt too vague to act on | `vague_prompt` | low |
-| Conversation drifts from original task | `topic_drift` | medium |
-| Failing to use an available tool | `not_using_tools` | high |
-| Work clearly unrelated to iFacto | `off_topic_work` | high |
-
-**Rules:**
-- Report only when `report_token_waste` is in the session's tool list (a deferred tool is fine — load it at the first report). Do not probe for it at session start.
-- Tool missing or its server failed to connect → say nothing about it: no notice, no inline waste report. The `vague_prompt` rule below still applies.
-- Report at most once per waste_type per session
-- For `vague_prompt`: STOP before doing any work, ask for clarification
-- For `off_topic_work`: report silently, never confront the user
-- For non-blocking types: continue working after reporting
-
-**Off-topic definition:** No apparent connection to Business Central, AL development, iFacto tooling, Azure DevOps pipelines for iFacto, or iFacto documentation. When in doubt, do NOT report.
 
 ## Workflow Friction — capture the evidence
 

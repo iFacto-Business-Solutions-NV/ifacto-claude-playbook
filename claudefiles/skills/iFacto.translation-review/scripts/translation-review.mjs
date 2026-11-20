@@ -14,6 +14,7 @@
 //         node translation-review.mjs validate     --work <dir> --chunk <NN>
 //         node translation-review.mjs merge        --work <dir>
 //         node translation-review.mjs import       --work <dir> --xlsx <file> --project <App> [--g <file>] [--dry-run] [--allow-drop]
+//         node translation-review.mjs sort-glossary --project <App>
 //
 // The work folder (default ~/Downloads/translation-review/<app>-<date>) holds the snapshot,
 // the reference translations, the glossary, the review and the workbooks. It holds customer
@@ -50,7 +51,8 @@ const USAGE = `Usage:
   node translation-review.mjs join         --work <dir> --chunk <NN>
   node translation-review.mjs validate     --work <dir> --chunk <NN>
   node translation-review.mjs merge        --work <dir>
-  node translation-review.mjs import       --work <dir> --xlsx <file> --project <App> [--g <file>] [--dry-run] [--allow-drop]`;
+  node translation-review.mjs import       --work <dir> --xlsx <file> --project <App> [--g <file>] [--dry-run] [--allow-drop]
+  node translation-review.mjs sort-glossary --project <App>`;
 
 export class UsageError extends Error {}
 
@@ -238,24 +240,63 @@ function projectGlossaryForWrite(projectDir) {
 }
 
 /**
+ * The project glossary's terms in a fixed order: by key, compared by UTF-16 code unit (JS `<`), a term without a key
+ * first. Two branches that each add a term then mostly change different places of the file, and git merges them.
+ * Never localeCompare: its order depends on the machine's ICU and locale, and two developers would keep reordering
+ * the file.
+ */
+const keyOf = (t) => (typeof t?.key === 'string' ? t.key : '');
+const byKey = (a, b) => { const x = keyOf(a); const y = keyOf(b); return x < y ? -1 : x > y ? 1 : 0; };
+const sortedTerms = (terms) => [...(terms ?? [])].sort(byKey);
+const glossaryText = (value) => `${JSON.stringify(value, null, 1)}\n`;
+/** The same glossary text, whatever BOM or line endings the checkout gave the file (core.autocrlf on Windows). */
+const sameGlossaryText = (fileText, text) => fileText.replace(/^﻿/, '').replace(/\r\n/g, '\n') === text;
+
+/** Writes the project glossary in the file's own line endings: a CRLF checkout stays CRLF, so git sees only what changed. */
+function writeGlossaryFile(path, value) {
+    const crlf = existsSync(path) && readFileSync(path, 'utf8').includes('\r\n');
+    const text = glossaryText(value);
+    writeFileSync(path, crlf ? text.replace(/\n/g, '\r\n') : text, 'utf8');
+}
+
+/**
  * Keeps the glossary in the customer repo, so the next round starts from the same terms, and records the last full
- * round (`lastFullRound`: date, commit, languages), so the next full round offers only what is still open. Unchanged
- * terms are not rewritten: a new date alone would make every feature PR conflict on this file. Returns the path, or
+ * round (`lastFullRound`: date, commit, languages), so the next full round offers only what is still open. The file
+ * carries no date of its own (git has it) and its terms are sorted by key: a date, or terms appended at the end,
+ * would make every two feature PRs that add a term conflict on this file. Unchanged terms are not rewritten, in
+ * whatever order the file holds them: only `sort-glossary` reorders a file nothing changed in. Returns the path, or
  * null when nothing changed.
  */
 function writeProjectGlossary(projectDir, glossary, { fullRound = null } = {}) {
     if (!glossary && !fullRound) { return null; }
     const path = glossaryFileOf(projectDir);
     const existing = projectGlossaryForWrite(projectDir);
-    const terms = glossary ? glossary.terms.map(({ origin, ...t }) => t) : existing?.terms ?? [];
+    const terms = sortedTerms(glossary ? glossary.terms.map(({ origin, ...t }) => t) : existing?.terms);
     const last = fullRound
         ? { ...fullRound, langs: [...new Set([...(existing?.lastFullRound?.langs ?? []), ...fullRound.langs])].sort() }
         : existing?.lastFullRound ?? null;
     if (existing
-        && JSON.stringify(existing.terms ?? null) === JSON.stringify(terms)
+        && JSON.stringify(sortedTerms(existing.terms)) === JSON.stringify(terms)
         && JSON.stringify(existing.lastFullRound ?? null) === JSON.stringify(last)) { return null; }
-    writeJson(path, { schema: SCHEMA, updated: today(), ...(last ? { lastFullRound: last } : {}), terms });
+    writeGlossaryFile(path, { schema: SCHEMA, ...(last ? { lastFullRound: last } : {}), terms });
     return path;
+}
+
+/**
+ * Puts an existing project glossary in the form every later write keeps: terms sorted by key, no `updated` date.
+ * Run once per customer repo, on master, in a commit of its own: the branches open at that moment then meet the
+ * reordering once, and every branch after it adds its terms without touching the others.
+ */
+export function commandSortGlossary(opts) {
+    const path = glossaryFileOf(need(opts, 'project'));
+    if (!existsSync(path)) { throw new UsageError(`${path} does not exist: there is no project glossary to sort`); }
+    const glossary = projectGlossaryForWrite(opts.project);
+    if (!glossary || typeof glossary !== 'object' || Array.isArray(glossary)) { throw new UsageError(`${path} holds no glossary object`); }
+    const { updated, ...rest } = glossary;
+    const value = { ...rest, terms: sortedTerms(rest.terms) };
+    if (sameGlossaryText(readFileSync(path, 'utf8'), glossaryText(value))) { return { status: 'unchanged', path }; }
+    writeGlossaryFile(path, value);
+    return { status: 'sorted', path };
 }
 
 /* ------------------------------------------------------------------ *
@@ -801,7 +842,10 @@ export function commandImportTerms(opts) {
         }
         const remark = cellText(rec.Opmerking).trim();
         if (remark) { remarks.push({ key, en: term.en, remark }); }
-        term.decided = today();
+        // The customer's word makes a term binding. A term decided before and confirmed again keeps its date: a new
+        // date on every row would rewrite the whole project glossary, and branches would conflict on every term.
+        const termChanged = changed.some((c) => c.key === key);
+        if (termChanged || !term.decided) { term.decided = today(); }
     }
     // An unreadable project glossary stops here, before the work glossary takes the customer's terms.
     if (opts.project) { projectGlossaryForWrite(opts.project); }
@@ -1320,6 +1364,7 @@ export async function main(argv = process.argv.slice(2), io = { out: (s) => proc
         case 'validate': { const { code, text } = commandValidate(opts); io.out(`${text}\n`); return code; }
         case 'merge': { const { code, result } = commandMerge(opts); json(result); return code; }
         case 'import': json(commandImport(opts)); return 0;
+        case 'sort-glossary': json(commandSortGlossary(opts)); return 0;
         default: throw new UsageError(command ? `unknown command: ${command}` : 'no command');
         }
     } catch (err) {

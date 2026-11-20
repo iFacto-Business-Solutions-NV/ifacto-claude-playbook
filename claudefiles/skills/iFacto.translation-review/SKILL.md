@@ -340,6 +340,21 @@ keeps that record as it is. The file goes into the PR with the translations. A
 `translation-glossary.json` that is not valid JSON (a merge conflict) stops the import before any
 file is written: resolve it, then import again.
 
+**The file is written to merge.** Its terms are sorted by key and it carries no date, so two
+branches that each add a term mostly change different places in it and git merges them. Two terms
+that land between the same two neighbours still conflict: keep both, but when both sides added the
+same key, keep one term (the later `decided`), never the key twice. A term confirmed again in a
+terms round keeps its `decided` date. A file written
+before that (with an `updated` date, new terms at the end) is reordered by the first import that
+changes a term: that branch then conflicts with every other open branch that adds terms. Sort it
+once per customer repo, on master, in a commit of its own, before the next feature round:
+
+```bash
+node ~/.claude/skills/iFacto.translation-review/scripts/translation-review.mjs sort-glossary --project "<repo>/<App>"
+```
+
+It reports `sorted` or `unchanged` and touches nothing else.
+
 The remarks (`Opmerking`) are in the report. Read them before the commit:
 
 - A remark that objects to a term: change that term in `<App>/translation-glossary.json` (or

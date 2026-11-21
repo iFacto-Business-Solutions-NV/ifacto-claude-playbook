@@ -1,5 +1,5 @@
 {
-  "description": "iFacto plugin hooks: the review gate (iFacto.CodeReviewer may not finish before the rulebook pass, the BCQuality dispatch and the security review have all run; hooks/review-gate.mjs) and the always-on instructions for machines without the managed CLAUDE.md block (hooks/always-on.mjs)",
+  "description": "iFacto plugin hooks: the review gate (iFacto.CodeReviewer may not finish before the rulebook pass, the BCQuality dispatch and the security review have all run; hooks/review-gate.mjs) and the always-on instructions for machines without the managed CLAUDE.md block (hooks/always-on.mjs). The SessionStart hooks are shell form ending in \"; exit 0\": on a machine without Node.js they are a silent no-op instead of a \"hook failed\" error on every session start. The two agent hooks stay loud on purpose: an iFacto agent without its gate must show",
   "hooks": {
     "SubagentStop": [
       {
@@ -19,43 +19,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
-              "session",
-              "1"
-            ],
-            "timeout": 10
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs\" session 1; exit 0",
+            "timeout": 20
           },
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
-              "session",
-              "2"
-            ],
-            "timeout": 10
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs\" session 2; exit 0",
+            "timeout": 20
           },
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
-              "session",
-              "3"
-            ],
-            "timeout": 10
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs\" session 3; exit 0",
+            "timeout": 20
           },
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs",
-              "session",
-              "4"
-            ],
-            "timeout": 10
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/always-on.mjs\" session 4; exit 0",
+            "timeout": 20
           }
         ]
       }

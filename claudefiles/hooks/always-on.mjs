@@ -20,6 +20,16 @@
 // session.
 // IFACTO_ALWAYS_ON_FORCE=1 skips the managed-block check (for testing on a developer machine).
 //
+// hooks.json starts the SessionStart hooks in shell form, as `node "<path>" session <k>; exit 0`.
+// Without Node.js the shell reports the missing command and `exit 0` still ends the hook as a
+// success, so a machine without Node gets no instructions and no "hook failed" line. The
+// SubagentStart hook stays exec form: it only runs when an iFacto agent starts, and an agent
+// without its gate must show. Exec form (command + args)
+// cannot do that: Claude Code fails to start `node` and shows one error per hook on every session
+// start. `; exit 0` and not `|| exit 0`: on Windows without Git Bash the shell is PowerShell,
+// where Windows PowerShell 5.1 has no `||` and PowerShell 7 does not accept `exit` after it.
+// The output is plain ASCII (\uXXXX escapes) so no shell or code page in between can damage it.
+//
 // Plain Node, no dependencies.
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -134,6 +144,11 @@ export function subagentOutput(text) {
     return { hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: header + gate } };
 }
 
+/** JSON with every non-ASCII character as a \uXXXX escape: the same value, safe in any code page. */
+export function asciiJson(value) {
+    return JSON.stringify(value).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 export function run(argv, { configDirs, force = process.env.IFACTO_ALWAYS_ON_FORCE === '1' } = {}) {
     if (!force && hasManagedBlock(configDirs)) { return null; }
     const text = readFileSync(SOURCE, 'utf8');
@@ -158,7 +173,7 @@ function isMain() {
 if (isMain()) {
     try {
         const out = run(process.argv.slice(2));
-        if (out) { process.stdout.write(JSON.stringify(out)); }
+        if (out) { process.stdout.write(asciiJson(out)); }
     } catch {
         // Never block a session over instructions.
     }
